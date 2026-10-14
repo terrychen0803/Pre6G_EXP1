@@ -41,6 +41,29 @@ class Exp1EvaluationTests(unittest.TestCase):
         value = EXCEL.timestamp("2026-10-01 08:00:00", EXCEL.offset("+08:00"))
         self.assertEqual(value, "2026-10-01T00:00:00Z")
 
+    def test_excel_outlet_filter_and_kw_conversion(self):
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            self.skipTest("openpyxl is not installed in this offline Python runtime")
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "meter.xlsx"
+            target = Path(raw) / "outlet.csv"
+            book = Workbook()
+            sheet = book.active
+            sheet.title = "power"
+            sheet.append(["time", "outlet", "kW"])
+            sheet.append(["2026-10-01 08:00:00", "A", 0.1])
+            sheet.append(["2026-10-01 08:00:30", "B", 0.8])
+            sheet.append(["2026-10-01 08:01:00", "A", 0.2])
+            book.save(source)
+            manifest = EXCEL.normalize(source, target, sheet="power", header_row=1,
+                timestamp_column="time", power_column="kW", outlet_column="outlet",
+                outlet_value="A", timezone_offset="+08:00", unit="kW")
+            self.assertEqual(manifest["sample_count"], 2)
+            self.assertEqual(target.read_text(encoding="utf-8").splitlines(),
+                ["timestamp,power_w", "2026-10-01T00:00:00Z,100.0", "2026-10-01T00:01:00Z,200.0"])
+
     def test_series_excludes_incomplete_runs(self):
         with tempfile.TemporaryDirectory() as raw:
             complete = Path(raw) / "complete.json"
