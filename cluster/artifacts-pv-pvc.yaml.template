@@ -1,0 +1,28 @@
+# Render MASTER_IP and NFS_EXPORT_PATH before applying. Keep the rendered file
+# with the private run evidence because the server address is site-specific.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pre6g-artifacts-nfs
+spec:
+  capacity:
+    storage: NFS_CAPACITY
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: MASTER_IP
+    path: NFS_EXPORT_PATH
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pre6g-artifacts
+  namespace: experiments
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: pre6g-artifacts-nfs
+  resources:
+    requests:
+      storage: NFS_CAPACITY

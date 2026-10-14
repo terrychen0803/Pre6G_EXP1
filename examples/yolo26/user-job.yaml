@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yolo26-train
+  namespace: experiments
+  labels:
+    app.kubernetes.io/name: yolo26-train
+  annotations:
+    # Generic platform contract: identifies which container is the user's
+    # application. The controller preserves its image/command/args/resources.
+    pre6g.io/application-container: trainer
+
+    # Semantic hints are optional. They help the platform select a workload
+    # adapter or understand total work, but they do not replace the real argv.
+    pre6g.io/workload-family: vision-training
+    pre6g.io/workload-adapter: yolo
+    pre6g.io/dataset-train-samples: "512"
+    pre6g.io/work-estimate-assumptions: single-gpu,no-gradient-accumulation,no-drop-last
+
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: yolo26-train
+    spec:
+      runtimeClassName: nvidia
+      restartPolicy: Never
+      containers:
+        - name: trainer
+
+          # Phase 05 placeholder only. Replace this with the immutable digest
+          # of the validated x86_64 test image before actual cluster execution.
+          image: registry.example.edu/pre6g/yolo26-train@sha256:REPLACE_WITH_IMMUTABLE_DIGEST
+
+          # This is ordinary user workload argv. The Pre6G core treats it as
+          # opaque execution data. The optional YOLO adapter can interpret a
+          # subset of these parameters for semantic discovery.
+          command: ["python3"]
+          args:
+            - train_yolo26.py
+            - --model
+            - yolo26n.yaml
+            - --data
+            - /data/synthetic_yolo/data.yaml
+            - --epochs
+            - "20"
+            - --batch
+            - "16"
+            - --imgsz
+            - "640"
+            - --device
+            - "0"
+            - --workers
+            - "0"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+              nvidia.com/gpu.shared: "1"
+            limits:
+              cpu: "8"
+              memory: 16Gi
+              nvidia.com/gpu.shared: "1"
+
+          volumeMounts:
+            - name: dataset
+              mountPath: /data
+              readOnly: true
+
+      volumes:
+        - name: dataset
+          persistentVolumeClaim:
+            claimName: yolo26-dataset

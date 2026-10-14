@@ -1,0 +1,46 @@
+schema_version: pre6g.power-model-bundle/v1
+status: validation_required
+model_scope: node-bound
+model_id: pdu1-outlet7-rtx5090-20260416-20260612
+model_version: "1.0.0"
+model_format: onnx
+
+data_window_from_artifact_name:
+  start: "2026-04-16"
+  end: "2026-06-12"
+
+node_binding:
+  kubernetes_node: mirc516-20250605
+  gpu_uuid: GPU-a4e6b1ee-8a31-991f-dc82-fdab833483c4
+  gpu_model: NVIDIA GeForce RTX 5090
+
+required_features:
+  - Top2 CPU%
+  - Top1 CPU%
+  - Top3 CPU%
+  - Mem Used(MB)
+  - Mem Free(MB)
+  - CPU User%
+  - GPU Power(W)
+
+target:
+  source_field: ACTUAL_POWER_W
+  semantics: node-total-power
+  semantics_verified: true
+  measurement_source: external-meter
+  unit: W
+
+artifact:
+  path: model.onnx
+  sha256: 9ae2f0db373ad39afcec841f7e9215d38b91d2f6cc277b39ac25b714a1e54754
+
+preprocessing:
+  path: scaler.json
+  sha256: 31f2134066b4cd90fe4c8f74fe3017fa53ec3dbe2a0aa9ce902cdc3b967bdcd3
+  method: min-max
+  clipping: false
+
+known_gaps:
+  - Original sample-data JSON was not supplied.
+  - Held-out metrics and missing-value policy are unknown.
+  - Scaler min/max bounds are reference ranges only; they are not an OOD policy.

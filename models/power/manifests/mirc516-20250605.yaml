@@ -1,0 +1,41 @@
+schema_version: pre6g.power-model-manifest/v1
+status: validation_required
+
+model_scope: node-bound
+model_id: pdu1-outlet7-rtx5090-20260416-20260612
+model_version: "1.0.0"
+
+node_binding:
+  kubernetes_node: mirc516-20250605
+  gpu_uuid: GPU-a4e6b1ee-8a31-991f-dc82-fdab833483c4
+  gpu_model: NVIDIA GeForce RTX 5090
+
+feature_schema_version: pre6g-energy-features/v2
+required_features:
+  - Top2 CPU%
+  - Top1 CPU%
+  - Top3 CPU%
+  - Mem Used(MB)
+  - Mem Free(MB)
+  - CPU User%
+  - GPU Power(W)
+
+target:
+  semantics: node-total-power
+  semantics_verified: true
+  measurement_source: external-meter
+  unit: W
+
+artifact:
+  uri: repo://models/power/bundles/pdu1-outlet7-20260416-20260612/model.onnx
+  sha256: 9ae2f0db373ad39afcec841f7e9215d38b91d2f6cc277b39ac25b714a1e54754
+
+preprocessing:
+  manifest_uri: repo://models/power/bundles/pdu1-outlet7-20260416-20260612/scaler.json
+  sha256: 31f2134066b4cd90fe4c8f74fe3017fa53ec3dbe2a0aa9ce902cdc3b967bdcd3
+
+notes:
+  - PDU1 Outlet7 is bound to the RTX 5090 node.
+  - ACTUAL_POWER_W is measured by an external meter and represents node-total wall power, not NVIDIA GPU power.
+  - Keep status validation_required until held-out metrics and missing-value policy are frozen.
+  - Scaler min/max exceedance is diagnostic only and does not reject power inference or ranking.

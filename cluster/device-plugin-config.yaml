@@ -1,0 +1,11 @@
+version: v1
+flags:
+  migStrategy: none
+  failOnInitError: true
+sharing:
+  timeSlicing:
+    renameByDefault: true
+    failRequestsGreaterThanOne: true
+    resources:
+      - name: nvidia.com/gpu
+        replicas: 2

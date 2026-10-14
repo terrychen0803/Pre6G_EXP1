@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("run_cross_node_dryrun", ROOT / "scripts" / "run_cross_node_dryrun.py")
+assert SPEC and SPEC.loader
+DRYRUN = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(DRYRUN)
+CONFIG = ROOT / "examples/yolo26/cross-node-dryrun.yaml"
+FORMAL_CONFIG = ROOT / "examples/yolo26/formal-cross-node-dryrun.yaml"
+COMMIT = subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()}", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+
+
+class CrossNodeDryrunTests(unittest.TestCase):
+    def test_master_model_override_records_hashes_and_rejects_unknown_node(self):
+        node = "iccl-s3-251230"
+        runtime = "models/runtime/RTX4090_yolo_trace_only_v1.json"
+        bundle = "models/power/bundles/pdu1-outlet1-20260416-20260612"
+        plan, _, _ = DRYRUN.prepare(FORMAL_CONFIG, run_id="model-switch-001", worker_commit=COMMIT,
+            model_overrides={node: {"runtime_model": runtime, "power_bundle": bundle}})
+        selected = next(item for item in plan["candidates"] if item["node"] == node)
+        self.assertEqual(selected["runtime_model"], str(ROOT / runtime))
+        self.assertEqual(len(selected["power_model_sha256"]), 64)
+        self.assertEqual(len(selected["power_scaler_sha256"]), 64)
+        with self.assertRaisesRegex(ValueError, "unknown candidate"):
+            DRYRUN.prepare(FORMAL_CONFIG, run_id="model-switch-002", worker_commit=COMMIT,
+                model_overrides={"wrong-node": {"runtime_model": runtime}})
+
+    def test_formal_batch_variant_keeps_two_profile_jobs_aligned(self):
+        config = yaml.safe_load(FORMAL_CONFIG.read_text(encoding="utf-8"))
+        source = yaml.safe_load((ROOT / config["source_job"]).read_text(encoding="utf-8"))
+        source["metadata"]["annotations"]["pre6g.io/total-work-units"] = str(1639 * 16)
+        trainer_args = source["spec"]["template"]["spec"]["containers"][0]["args"]
+        trainer_args[trainer_args.index("batch=16")] = "batch=32"
+        with tempfile.TemporaryDirectory() as raw:
+            temp = Path(raw)
+            source_path = temp / "source.yaml"
+            source_path.write_text(yaml.safe_dump(source), encoding="utf-8")
+            config["source_job"] = str(source_path)
+            for index, item in enumerate(config["candidates"]):
+                text = (ROOT / item["profile_job_template"]).read_text(encoding="utf-8")
+                profile = temp / f"profile-{index}.yaml"
+                profile.write_text(text.replace("batch=16", "batch=32"), encoding="utf-8")
+                item["profile_job_template"] = str(profile)
+            config_path = temp / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            plan, jobs, _ = DRYRUN.prepare(config_path, run_id="batch-32-001", worker_commit=COMMIT)
+            self.assertEqual(plan["source_total_work_units"], 1639 * 16)
+            self.assertEqual(len(jobs), 2)
+
+    def test_formal_plan_freezes_optional_eta_input_and_rejects_work_mismatch(self):
+        config = yaml.safe_load(FORMAL_CONFIG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as raw:
+            eta_path = Path(raw) / "eta.json"
+            eta = {"schema_version": "pre6g.full-job-eta-input/v1", "work_unit": "training_iteration",
+                   "plan": {"total_work_units": 52448, "warmup_work_units": 4,
+                            "validation_runs": 0, "checkpoint_writes": 0}, "nodes": {}}
+            eta_path.write_text(json.dumps(eta), encoding="utf-8")
+            config["full_job_eta_input"] = str(eta_path)
+            config_path = Path(raw) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            plan, _, _ = DRYRUN.prepare(config_path, run_id="formal-eta-001", worker_commit=COMMIT)
+            self.assertEqual(plan["full_job_eta_input"], str(eta_path))
+            self.assertEqual(len(plan["full_job_eta_input_sha256"]), 64)
+            eta["plan"]["total_work_units"] = 52449
+            eta_path.write_text(json.dumps(eta), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "differs from source Job"):
+                DRYRUN.prepare(config_path, run_id="formal-eta-001", worker_commit=COMMIT)
+
+    def test_plan_creates_concurrent_node_jobs_without_deploying(self):
+        plan, jobs, collector = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        self.assertEqual(plan["source_total_work_units"], 960)
+        self.assertEqual(plan["experiment_stage"], "functional-validation")
+        self.assertEqual(plan["test_purpose"], "cross-node-pipeline-integration")
+        self.assertFalse(plan["production_result"])
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(collector["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"], "pre6g-artifacts")
+        self.assertEqual(plan["collector_node"], "icclz2")
+        self.assertEqual(collector["spec"]["nodeSelector"]["kubernetes.io/hostname"], "icclz2")
+        self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"] for job in jobs}, {"iccl-s3-251230", "mirc516-20250605"})
+        for job in jobs:
+            annotations = job["metadata"]["annotations"]
+            self.assertEqual(annotations["pre6g.io/experiment-stage"], "functional-validation")
+            self.assertEqual(annotations["pre6g.io/test-purpose"], "cross-node-pipeline-integration")
+            self.assertEqual(annotations["pre6g.io/production-result"], "false")
+            container = job["spec"]["template"]["spec"]["containers"][0]
+            self.assertIn(COMMIT, container["command"][2])
+            self.assertIn("--duration=120", container["command"][2])
+            self.assertIn("run_command_with_end_marker.py", container["command"][2])
+            env = {item["name"]: item["value"] for item in container["env"]}
+            self.assertEqual(env["TASK_ID"], "test-run-001")
+            self.assertEqual(job["metadata"]["labels"]["pre6g.io/candidate-node"], env["NODE_NAME"])
+            self.assertEqual(env["DCGM_URL"], "DCGM_ENDPOINT_UNRESOLVED")
+
+    def test_formal_plan_preserves_full_workload_but_caps_capture_at_120_seconds(self):
+        plan, jobs, _ = DRYRUN.prepare(FORMAL_CONFIG, run_id="formal-test-001", worker_commit=COMMIT)
+        self.assertEqual(plan["experiment_stage"], "formal-experiment")
+        self.assertEqual(plan["test_purpose"], "dryrun-full-workload-prediction")
+        self.assertTrue(plan["full_workload_fixed"])
+        self.assertEqual(plan["source_epochs"], 1639)
+        self.assertEqual(plan["source_total_work_units"], 52448)
+        self.assertEqual(plan["long_detector_profile"], "yolo-v2-long")
+        for job in jobs:
+            self.assertEqual(job["metadata"]["annotations"]["pre6g.io/experiment-stage"], "formal-experiment")
+            command = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
+            self.assertIn("epochs=1639", command)
+            self.assertIn("--duration=120", command)
+            self.assertIn("scripts/evaluate_long_trace_periods.py", command)
+            self.assertIn("val=False", command)
+            self.assertIn("save=False", command)
+            self.assertIn("patience=0", command)
+            self.assertEqual(
+                job["metadata"]["annotations"]["pre6g.io/formal-workload-revision"],
+                "v2-training-only",
+            )
+
+    def test_formal_plan_rejects_worker_commit_without_new_detector(self):
+        with self.assertRaisesRegex(ValueError, "worker_commit lacks yolo-v2-long"):
+            DRYRUN.prepare(
+                FORMAL_CONFIG, run_id="formal-old-worker-001",
+                worker_commit="8113e7ab197b83b3956ef10f3da993a694e945a8",
+            )
+
+    def test_formal_profile_rejects_validation_semantic_mismatch(self):
+        config = yaml.safe_load(FORMAL_CONFIG.read_text(encoding="utf-8"))
+        original = Path(ROOT / config["candidates"][0]["profile_job_template"])
+        profile = original.read_text(encoding="utf-8").replace(
+            "                    val=False \\\n",
+            "",
+            1,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "profile.yaml"
+            path.write_text(profile, encoding="utf-8")
+            config["candidates"][0]["profile_job_template"] = str(path)
+            config_path = Path(raw) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "val=False"):
+                DRYRUN.prepare(config_path, run_id="formal-test-001", worker_commit=COMMIT)
+
+    def test_control_side_power_dependencies_load_before_cluster_execution(self):
+        plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        DRYRUN._check_control_side_dependencies(plan)
+
+    def test_wrong_bundle_binding_is_rejected(self):
+        config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+        config["candidates"][0]["power_bundle"] = config["candidates"][1]["power_bundle"]
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "config.yaml"
+            path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "bound to another node"):
+                DRYRUN.prepare(path, run_id="test-run-001", worker_commit=COMMIT)
+
+    def test_invalid_or_repeated_identity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "worker_commit"):
+            DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit="short")
+        with self.assertRaisesRegex(ValueError, "run_id"):
+            DRYRUN.prepare(CONFIG, run_id="../unsafe", worker_commit=COMMIT)
+
+    def test_cluster_preflight_needs_kubectl_and_never_submits_without_it(self):
+        plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN.shutil, "which", return_value=None), patch.object(DRYRUN.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+            with self.assertRaisesRegex(RuntimeError, "kubectl is unavailable"):
+                DRYRUN._preflight(plan, jobs, "missing-context", Path(raw))
+
+    def test_preflight_checks_context_nfs_nodes_and_resolves_dcgm_per_node(self):
+        plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+
+        def command_result(command, **_kwargs):
+            return SimpleNamespace(returncode=0 if command[0] == "git" else 1)
+
+        def kubectl_result(command, **_kwargs):
+            if command[:3] == ["kubectl", "config", "current-context"]:
+                return "test-context\n"
+            if "pv" in command:
+                return json.dumps({"status": {"phase": "Bound"}, "spec": {"accessModes": ["ReadWriteMany"], "claimRef": {"namespace": "experiments", "name": "pre6g-artifacts"}, "nfs": {"server": "nfs.example", "path": "/srv/pre6g-artifacts"}}})
+            if "pvc" in command:
+                return json.dumps({"status": {"phase": "Bound"}, "spec": {"accessModes": ["ReadWriteMany"], "volumeName": "pre6g-artifacts-nfs"}})
+            if "jobs" in command:
+                return json.dumps({"items": []})
+            if "node" in command:
+                return json.dumps({"status": {"conditions": [{"type": "Ready", "status": "True"}, {"type": "DiskPressure", "status": "False"}], "allocatable": {"nvidia.com/gpu.shared": "1"}}})
+            if "pods" in command:
+                return json.dumps({"items": [{"spec": {"nodeName": item["node"]}, "status": {"phase": "Running", "podIP": f"10.42.0.{index + 1}", "conditions": [{"type": "Ready", "status": "True"}]}} for index, item in enumerate(plan["candidates"])]})
+            return ""
+
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN.shutil, "which", return_value="kubectl"), patch.object(DRYRUN.subprocess, "run", side_effect=command_result), patch.object(DRYRUN, "_invoke", side_effect=kubectl_result) as invoke:
+            resolved = DRYRUN._preflight(plan, jobs, "test-context", Path(raw))
+            self.assertEqual(invoke.call_count, 12)
+            rendered = list(yaml.safe_load_all(resolved.read_text(encoding="utf-8")))
+            self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"]: next(row["value"] for row in job["spec"]["template"]["spec"]["containers"][0]["env"] if row["name"] == "DCGM_URL") for job in rendered}, {"iccl-s3-251230": "http://10.42.0.1:9400", "mirc516-20250605": "http://10.42.0.2:9400"})
+
+    def test_dcgm_lookup_rejects_missing_node_exporter(self):
+        plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", return_value=json.dumps({"items": []})):
+            with self.assertRaisesRegex(RuntimeError, "expected exactly one DCGM exporter Pod"):
+                DRYRUN._resolve_dcgm_urls(plan, "test-context", Path(raw))
+
+    def test_dcgm_lookup_rejects_not_ready_exporter(self):
+        plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        pod = {"spec": {"nodeName": plan["candidates"][0]["node"]}, "status": {"phase": "Running", "podIP": "10.42.0.1", "conditions": [{"type": "Ready", "status": "False"}]}}
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", return_value=json.dumps({"items": [pod]})):
+            with self.assertRaisesRegex(RuntimeError, "not Running/Ready"):
+                DRYRUN._resolve_dcgm_urls(plan, "test-context", Path(raw))
+
+    def test_smoke_pods_use_two_bound_nodes_without_training(self):
+        compile(DRYRUN.SMOKE_PROGRAM, "<smoke-pod>", "exec")
+        plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        for job in jobs:
+            env = {item["name"]: item for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+            env["DCGM_URL"]["value"] = "http://10.42.0.1:9400"
+        pods = DRYRUN._smoke_pods(plan, jobs)
+        self.assertEqual(len(pods), 2)
+        for pod in pods:
+            spec = pod["spec"]
+            self.assertEqual(spec["runtimeClassName"], "nvidia")
+            self.assertEqual(spec["activeDeadlineSeconds"], 300)
+            self.assertEqual(spec["containers"][0]["resources"]["requests"]["nvidia.com/gpu.shared"], "1")
+            self.assertIn("nvidia-smi", spec["containers"][0]["command"][2])
+            self.assertNotIn("yolo detect train", spec["containers"][0]["command"][2])
+            self.assertEqual({volume["name"] for volume in spec["volumes"]}, {"artifacts", "nsys"})
+        self.assertEqual({pod["spec"]["nodeSelector"]["kubernetes.io/hostname"] for pod in pods}, {item["node"] for item in plan["candidates"]})
+
+    def test_smoke_pods_are_deleted_after_success(self):
+        plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        for job in jobs:
+            env = {item["name"]: item for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+            env["DCGM_URL"]["value"] = "http://10.42.0.1:9400"
+        pods = DRYRUN._smoke_pods(plan, jobs)
+        queries = 0
+
+        def fake_kubectl(command, **_kwargs):
+            nonlocal queries
+            if "get" in command and "pods" in command:
+                queries += 1
+                if queries == 1:
+                    return json.dumps({"items": []})
+                return json.dumps({"items": [{"metadata": {"name": pod["metadata"]["name"]}, "status": {"phase": "Succeeded"}} for pod in pods]})
+            return ""
+
+        def fake_logs(command, **_kwargs):
+            name = command[command.index("logs") + 1]
+            candidate = next(item for item in plan["candidates"] if item["node"] in name)
+            payload = {"schema_version": "pre6g.cross-node-smoke-result/v1", "passed": True, "run_id": plan["run_id"], "node": candidate["node"], "gpu_uuid": candidate["gpu_uuid"], "nfs_peer_read": True, "github_access": True}
+            return SimpleNamespace(stdout="PRE6G_SMOKE_RESULT=" + json.dumps(payload) + "\n", stderr="", returncode=0)
+
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", side_effect=fake_kubectl) as invoke, patch.object(DRYRUN.subprocess, "run", side_effect=fake_logs):
+            DRYRUN._run_smoke(plan, jobs, "test-context", Path(raw))
+            result = json.loads((Path(raw) / "smoke-result.json").read_text(encoding="utf-8"))
+            self.assertTrue(result["passed"])
+            self.assertEqual(len(result["results"]), 2)
+            self.assertEqual(sum("delete" in call.args[0] for call in invoke.call_args_list), 2)
+
+    def test_target_wrapper_records_process_window(self):
+        with tempfile.TemporaryDirectory() as raw:
+            marker = Path(raw) / "application-window.json"
+            result = subprocess.run([
+                sys.executable, str(ROOT / "scripts/run_command_with_end_marker.py"),
+                "--output", str(marker), "--", sys.executable, "-c", "print('trained')",
+            ], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0)
+            window = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertLess(window["started_at_unix_ns"], window["finished_at_unix_ns"])
+            self.assertEqual(window["returncode"], 0)
+
+    def test_telemetry_crop_requires_full_target_coverage(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            csv_path = root / "aligned.csv"
+            start = 1_000_000_000_000
+            csv_path.write_text("timestamp_ns,power\n" + "".join(f"{start + i * 1_000_000_000},{100 + i}\n" for i in range(12)), encoding="utf-8")
+            window = root / "window.json"
+            window.write_text(json.dumps({
+                "schema_version": "pre6g.application-window/v1",
+                "command": ["yolo", "detect", "train"],
+                "started_at_unix_ns": start,
+                "finished_at_unix_ns": start + 11_000_000_000,
+            }), encoding="utf-8")
+            crop = DRYRUN._crop_telemetry(csv_path, window, root / "cropped.csv")
+            self.assertEqual(crop["sample_count"], 12)
+            self.assertTrue((root / "cropped.csv").is_file())
+            window.write_text(json.dumps({
+                "schema_version": "pre6g.application-window/v1",
+                "command": ["yolo", "detect", "train"],
+                "started_at_unix_ns": start - 3_000_000_000,
+                "finished_at_unix_ns": start + 11_000_000_000,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not cover"):
+                DRYRUN._crop_telemetry(csv_path, window, root / "bad.csv")
+
+    def test_wait_requires_all_candidate_jobs(self):
+        plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        jobs = [{"metadata": {"name": row["job_name"]}, "status": {"succeeded": 1}} for row in plan["candidates"]]
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", return_value=json.dumps({"items": jobs})):
+            DRYRUN._wait_jobs(plan, "test-context", Path(raw), 10)
+            status = json.loads((Path(raw) / "dryrun-jobs-status.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(status["items"]), 2)
+        jobs[1]["status"] = {"failed": 1}
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", return_value=json.dumps({"items": jobs})):
+            with self.assertRaisesRegex(RuntimeError, "dry-run Job failed"):
+                DRYRUN._wait_jobs(plan, "test-context", Path(raw), 10)
+
+    def test_master_assembles_and_ranks_collected_predictions(self):
+        plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        plan["long_detector_profile"] = "yolo-v2-long"
+        real_invoke = DRYRUN._invoke
+
+        def fake_inference(command, **kwargs):
+            script_name = Path(command[1]).name
+            if script_name in {"discover_work.py", "provisional_rank_nodes.py"}:
+                return real_invoke(command, **kwargs)
+            output = Path(command[command.index("--output") + 1]) if "--output" in command else Path(command[command.index("--output-summary") + 1])
+            node = next(row["node"] for row in plan["candidates"] if row["node"] in str(output))
+            if script_name == "predict_runtime.py":
+                payload = {"model_id": f"runtime-{node}", "predicted_runtime_ms": 50}
+            elif script_name == "aggregate_runtime.py":
+                payload = {"node": node, "device_id": next(row["device_id"] for row in plan["candidates"] if row["node"] == node), "model_id": f"runtime-{node}", "work_unit": "training_iteration", "total_work_units": 960, "predicted_runtime_ms_per_work_unit": 50 if node == plan["candidates"][0]["node"] else 100}
+            else:
+                candidate = next(row for row in plan["candidates"] if row["node"] == node)
+                payload = {"bound_node": node, "bound_gpu_uuid": candidate["gpu_uuid"], "target_semantics": "node-total-power", "target_unit": "W", "model_id": f"power-{node}", "status": "validation_required", "range_exceeded": True, "range_warnings": ["reference range exceeded"], "observed_profile_window": {"time_weighted_mean_predicted_power_w": 100 if node == plan["candidates"][0]["node"] else 200}}
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(payload), encoding="utf-8")
+            return ""
+
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw)
+            eta_path = output / "eta.json"
+            eta_path.write_text(json.dumps({
+                "schema_version": "pre6g.full-job-eta-input/v1", "work_unit": "training_iteration",
+                "plan": {"total_work_units": 960, "warmup_work_units": 4,
+                         "validation_runs": 0, "checkpoint_writes": 0},
+                "nodes": {item["node"]: {
+                    "dry_run": {"startup_s": 2, "warmup_work_unit_s": 0.2},
+                    "calibration": {"finalization_s": 0.3},
+                    "calibration_source_runs": [{"run_id": "prior-full-job", "completed_naturally": True}],
+                } for item in plan["candidates"]},
+            }), encoding="utf-8")
+            plan["full_job_eta_input"] = str(eta_path)
+            plan["full_job_eta_input_sha256"] = DRYRUN._digest(eta_path)
+            for item in plan["candidates"]:
+                node = item["node"]
+                artifacts = output / "artifacts" / node
+                telemetry = artifacts / "telemetry"
+                telemetry.mkdir(parents=True)
+                features = {"schema_version": "pre6g.runtime-features/v1", "node": node, "device_id": item["device_id"]}
+                profile = {"schema_version": "pre6g.profile-result/v1", "task_id": plan["run_id"], "node": node, "device_id": item["device_id"], "status": "ready-for-control-side-inference", "detector": {"complete_cycles": 5}, "runtime_features": features}
+                (artifacts / "runtime-features.json").write_text(json.dumps(features), encoding="utf-8")
+                (artifacts / "profile-result.json").write_text(json.dumps(profile), encoding="utf-8")
+                detector_v2 = artifacts / "detector-v2"
+                detector_v2.mkdir()
+                (detector_v2 / "trajectory.json").write_text(json.dumps({
+                    "detector_profile": "yolo-v2-long", "status": "stable_observed",
+                    "used_as_runtime_model_input": False,
+                }), encoding="utf-8")
+                (telemetry / "alignment-quality.json").write_text(json.dumps({"pass": True}), encoding="utf-8")
+                start = 1_000_000_000_000
+                (telemetry / "application-window.json").write_text(json.dumps({"schema_version": "pre6g.application-window/v1", "command": ["yolo", "detect", "train"], "started_at_unix_ns": start, "finished_at_unix_ns": start + 11_000_000_000}), encoding="utf-8")
+                (telemetry / "aligned-telemetry.csv").write_text("timestamp_ns,power\n" + "".join(f"{start + i * 1_000_000_000},100\n" for i in range(12)), encoding="utf-8")
+            with patch.object(DRYRUN, "_invoke", side_effect=fake_inference):
+                DRYRUN._predict(plan, output)
+            ranking_input = json.loads((output / "ranking-input.json").read_text(encoding="utf-8"))
+            ranking = json.loads((output / "provisional-ranking.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ranking_input["candidates"]), 2)
+            self.assertEqual(ranking["selected_node"], plan["candidates"][0]["node"])
+            self.assertEqual(ranking["ranked"][0]["long_detector_diagnostic"]["detector_profile"], "yolo-v2-long")
+            self.assertEqual(ranking["ranked"][0]["total_job_runtime_status"], "ready")
+            self.assertGreater(ranking["ranked"][0]["predicted_total_job_runtime_s"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
