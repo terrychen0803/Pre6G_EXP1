@@ -204,7 +204,20 @@ def _value(
     series: dict[int, dict[str, float | None]],
     timestamp_s: int,
     dimension: str,
+    hold_last_s: int = 0,
 ) -> float | None:
+    if hold_last_s:
+        # system.load updates every 5 seconds in Netdata. Keep the most
+        # recent valid observation without using future data.
+        for age in range(hold_last_s + 1):
+            row = series.get(timestamp_s - age)
+            if row is None:
+                continue
+            value = _finite(row.get(dimension))
+            if value is not None:
+                return value
+        return None
+
     row = _nearest(series, timestamp_s)
     if row is None:
         return None
@@ -283,7 +296,7 @@ def query_window(
         base_url, "system.cpu", after_s, before_s, timeout_s, retries
     )
     load = _query_chart(
-        base_url, "system.load", after_s, before_s, timeout_s, retries
+        base_url, "system.load", after_s - 5, before_s, timeout_s, retries
     )
     ram = _query_chart(
         base_url, "system.ram", after_s, before_s, timeout_s, retries
@@ -343,9 +356,9 @@ def query_window(
                 "CPU User%": _value(cpu, timestamp_s, "user"),
                 "CPU System%": _value(cpu, timestamp_s, "system"),
                 "CPU IOWait%": _value(cpu, timestamp_s, "iowait"),
-                "Load 1min": _value(load, timestamp_s, "load1"),
-                "Load 5min": _value(load, timestamp_s, "load5"),
-                "Load 15min": _value(load, timestamp_s, "load15"),
+                "Load 1min": _value(load, timestamp_s, "load1", hold_last_s=5),
+                "Load 5min": _value(load, timestamp_s, "load5", hold_last_s=5),
+                "Load 15min": _value(load, timestamp_s, "load15", hold_last_s=5),
                 "Mem Used(MB)": _value(ram, timestamp_s, "used"),
                 "Mem Free(MB)": _value(ram, timestamp_s, "free"),
                 "CPU Temp(°C)": _value(temp, timestamp_s, "input"),
