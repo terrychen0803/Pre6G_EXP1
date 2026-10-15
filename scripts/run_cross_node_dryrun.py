@@ -24,6 +24,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from pre6g_experiment.work import estimate_work  # noqa: E402
+from pre6g_experiment.runtime_model import load_model  # noqa: E402
 
 
 NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z")
@@ -412,7 +413,7 @@ def prepare(
             raise ValueError(f"{node}: power bundle is bound to another node")
         if manifest.get("node_binding", {}).get("gpu_uuid") != values["GPU_UUID"].get("value"):
             raise ValueError(f"{node}: power bundle GPU UUID differs from profile Job")
-        model = _json(runtime_model)
+        model = load_model(runtime_model)
         if model.get("device_id") != item["device_id"]:
             raise ValueError(f"{node}: runtime model device differs from profile Job")
         if model.get("detector_profile") != "yolo-v1" or model.get("workload_family") != "YOLO26":

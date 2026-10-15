@@ -26,7 +26,7 @@ COMMIT = subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()
 class CrossNodeDryrunTests(unittest.TestCase):
     def test_master_model_override_records_hashes_and_rejects_unknown_node(self):
         node = "iccl-s3-251230"
-        runtime = "models/runtime/RTX4090_yolo_trace_only_v1.json"
+        runtime = "models/runtime/RTX4090_yolo_soft_gate_v1.json"
         bundle = "models/power/bundles/pdu1-outlet1-20260416-20260612"
         plan, _, _ = DRYRUN.prepare(FORMAL_CONFIG, run_id="model-switch-001", worker_commit=COMMIT,
             model_overrides={node: {"runtime_model": runtime, "power_bundle": bundle}})

@@ -18,9 +18,10 @@ class RuntimePrediction:
     detected_unit: str
     predicted_runtime_ms: float
     feature_count: int
+    inferred_high_load_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": "pre6g.runtime-prediction/v1",
             "model_id": self.model_id,
             "device_id": self.device_id,
@@ -28,6 +29,28 @@ class RuntimePrediction:
             "predicted_runtime_ms": self.predicted_runtime_ms,
             "feature_count": self.feature_count,
         }
+        if self.inferred_high_load_score is not None:
+            payload["inferred_high_load_score"] = self.inferred_high_load_score
+        return payload
+
+
+def _numbers(values: Any, length: int, label: str) -> list[float]:
+    if not isinstance(values, list) or len(values) != length:
+        raise RuntimeModelError(f"{label} must contain {length} values")
+    try:
+        parsed = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeModelError(f"{label} contains a non-numeric value") from exc
+    if not all(math.isfinite(value) for value in parsed):
+        raise RuntimeModelError(f"{label} contains a non-finite value")
+    return parsed
+
+
+def _positive_scales(values: Any, length: int, label: str) -> list[float]:
+    scales = _numbers(values, length, label)
+    if any(value <= 0.0 for value in scales):
+        raise RuntimeModelError(f"{label} contains a non-positive scale")
+    return scales
 
 
 def load_model(path: Path) -> dict[str, Any]:
@@ -40,8 +63,6 @@ def load_model(path: Path) -> dict[str, Any]:
         "device_id",
         "detected_unit",
         "feature_names",
-        "preprocessing",
-        "model",
     }
     missing = sorted(required - set(payload))
     if missing:
@@ -49,29 +70,45 @@ def load_model(path: Path) -> dict[str, Any]:
             f"runtime model is missing required fields: {missing}"
         )
 
-    if payload["schema_version"] != "pre6g.runtime-model/v1":
-        raise RuntimeModelError(
-            f"unsupported runtime model schema: {payload['schema_version']}"
-        )
-
-    if payload["model_type"] != "ridge_log_runtime":
-        raise RuntimeModelError(
-            f"unsupported runtime model type: {payload['model_type']}"
-        )
-
     names = payload["feature_names"]
-    means = payload["preprocessing"].get("means", [])
-    scales = payload["preprocessing"].get("scales", [])
-    coefficients = payload["model"].get("coefficients", [])
-
+    if not isinstance(names, list) or not names or not all(
+        isinstance(name, str) and name for name in names
+    ) or len(set(names)) != len(names):
+        raise RuntimeModelError("runtime model has invalid feature_names")
     width = len(names)
-    if not (len(means) == len(scales) == len(coefficients) == width):
-        raise RuntimeModelError(
-            "runtime model feature_names/means/scales/coefficients length mismatch"
-        )
+    version = payload["schema_version"]
+    model_type = payload["model_type"]
 
-    if any(float(scale) <= 0.0 for scale in scales):
-        raise RuntimeModelError("runtime model contains non-positive scale")
+    if version == "pre6g.runtime-model/v1" and model_type == "ridge_log_runtime":
+        preprocessing = payload.get("preprocessing")
+        ridge = payload.get("model")
+        if not isinstance(preprocessing, dict) or not isinstance(ridge, dict):
+            raise RuntimeModelError("ridge runtime model is missing preprocessing/model")
+        _numbers(preprocessing.get("means"), width, "preprocessing.means")
+        _positive_scales(preprocessing.get("scales"), width, "preprocessing.scales")
+        _numbers(ridge.get("coefficients"), width, "model.coefficients")
+        _numbers([ridge.get("intercept")], 1, "model.intercept")
+    elif version == "pre6g.runtime-model/v2" and model_type == "trace_soft_regime_interactions_crossfit_gate":
+        gate = payload.get("gate")
+        ridge = payload.get("ridge")
+        if not isinstance(gate, dict) or not isinstance(ridge, dict):
+            raise RuntimeModelError("soft-gate runtime model is missing gate/ridge")
+        _numbers(gate.get("means"), width, "gate.means")
+        _positive_scales(gate.get("scales"), width, "gate.scales")
+        centroids = gate.get("centroids")
+        if not isinstance(centroids, dict):
+            raise RuntimeModelError("soft-gate runtime model is missing centroids")
+        for condition in ("clean", "high_load_01"):
+            _numbers(centroids.get(condition), width, f"gate.centroids.{condition}")
+        temperature = _numbers([gate.get("temperature")], 1, "gate.temperature")[0]
+        if temperature <= 0.0:
+            raise RuntimeModelError("gate.temperature must be positive")
+        expanded_width = 2 * width + 1
+        _numbers(ridge.get("means"), expanded_width, "ridge.means")
+        _positive_scales(ridge.get("scales"), expanded_width, "ridge.scales")
+        _numbers(ridge.get("coefficients"), expanded_width + 1, "ridge.coefficients")
+    else:
+        raise RuntimeModelError(f"unsupported runtime model schema/type: {version}/{model_type}")
 
     return payload
 
@@ -129,29 +166,35 @@ def predict_runtime(
             f"missing runtime features: {missing}"
         )
 
-    values = [float(feature_map[name]) for name in names]
-    means = [float(value) for value in model["preprocessing"]["means"]]
-    scales = [float(value) for value in model["preprocessing"]["scales"]]
-
-    standardized = [
-        (value - means[index]) / scales[index]
-        for index, value in enumerate(values)
-    ]
-
-    intercept = float(model["model"]["intercept"])
-    coefficients = [
-        float(value)
-        for value in model["model"]["coefficients"]
-    ]
-
-    log_runtime = intercept + sum(
-        coefficient * value
-        for coefficient, value in zip(
-            coefficients,
-            standardized,
+    values = _numbers([feature_map[name] for name in names], len(names), "trace_features")
+    score = None
+    if model["model_type"] == "ridge_log_runtime":
+        means = model["preprocessing"]["means"]
+        scales = model["preprocessing"]["scales"]
+        standardized = [(value - mean) / scale for value, mean, scale in zip(values, means, scales)]
+        ridge = model["model"]
+        log_runtime = ridge["intercept"] + sum(
+            coefficient * value for coefficient, value in zip(ridge["coefficients"], standardized)
         )
-    )
-    prediction = math.exp(log_runtime)
+    else:
+        gate = model["gate"]
+        point = [(value - mean) / scale for value, mean, scale in zip(values, gate["means"], gate["scales"])]
+        centroids = gate["centroids"]
+        clean_distance = sum((value - center) ** 2 for value, center in zip(point, centroids["clean"]))
+        loaded_distance = sum((value - center) ** 2 for value, center in zip(point, centroids["high_load_01"]))
+        logit = max(-50.0, min(50.0, (clean_distance - loaded_distance) / gate["temperature"]))
+        score = 1.0 / (1.0 + math.exp(-logit))
+        expanded = [*values, score, *[score * value for value in values]]
+        ridge = model["ridge"]
+        standardized = [1.0] + [
+            (value - mean) / scale for value, mean, scale in zip(expanded, ridge["means"], ridge["scales"])
+        ]
+        log_runtime = sum(value * coefficient for value, coefficient in zip(standardized, ridge["coefficients"]))
+
+    try:
+        prediction = math.exp(log_runtime)
+    except OverflowError as exc:
+        raise RuntimeModelError("runtime prediction overflow") from exc
 
     if not math.isfinite(prediction) or prediction <= 0.0:
         raise RuntimeModelError(
@@ -164,4 +207,5 @@ def predict_runtime(
         detected_unit=model_unit,
         predicted_runtime_ms=prediction,
         feature_count=len(names),
+        inferred_high_load_score=score,
     )

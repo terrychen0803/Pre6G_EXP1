@@ -24,13 +24,13 @@ python scripts/run_experiment_pipeline.py \
   --cross-node-config examples/yolo26/formal-cross-node-dryrun.yaml \
   --run-id exp1-b16-r01 \
   --worker-commit "$(git rev-parse HEAD)" \
-  --candidate-runtime-model iccl-s3-251230=models/runtime/RTX4090_yolo_trace_only_v1.json \
+  --candidate-runtime-model iccl-s3-251230=models/runtime/RTX4090_yolo_soft_gate_v1.json \
   --candidate-runtime-model mirc516-20250605=models/runtime/RTX5090_yolo_trace_only_v1.json \
   --candidate-power-bundle iccl-s3-251230=models/power/bundles/pdu1-outlet1-20260416-20260612 \
   --candidate-power-bundle mirc516-20250605=models/power/bundles/pdu1-outlet7-20260416-20260612 \
   --output-dir generated/exp1-b16-r01
 ```
 
-以上預設只產生計畫，不會建立 Kubernetes Job。切換新模型時指定新路徑即可；程式會檢查節點/GPU、YOLO26 `yolo-v1` 相容性，並把所選模型及 scaler 雜湊寫入 `cross-node-plan.json`。目前 runtime 引擎接受 `pre6g.runtime-model/v1` 的 `ridge_log_runtime`；其他模型格式需要新增 adapter 後才能載入。
+以上預設只產生計畫，不會建立 Kubernetes Job。程式會檢查節點/GPU、YOLO26 `yolo-v1` 相容性，並把所選模型及 scaler 雜湊寫入 `cross-node-plan.json`。4090 預設使用 `pre6g.runtime-model/v2` 的 soft-gate ridge 模型；5090 仍使用 `pre6g.runtime-model/v1` 的 ridge 模型。新模型的訓練端與 EXP1 特徵抽取結果尚未以同一筆 trace 核對，實機結果仍需驗證。
 
 完整訓練、PDU Excel 匯入與多次結果彙整請依[重現手冊](docs/EXP1-reproduction-zh.md)操作。

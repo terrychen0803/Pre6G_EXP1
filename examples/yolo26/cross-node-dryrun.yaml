@@ -13,7 +13,7 @@ candidates:
   - node: iccl-s3-251230
     device_id: RTX4090
     profile_job_template: k8s/formal/yolo26-rtx4090-formal-120s.yaml
-    runtime_model: models/runtime/RTX4090_yolo_trace_only_v1.json
+    runtime_model: models/runtime/RTX4090_yolo_soft_gate_v1.json
     power_bundle: models/power/bundles/pdu1-outlet1-20260416-20260612
   - node: mirc516-20250605
     device_id: RTX5090
