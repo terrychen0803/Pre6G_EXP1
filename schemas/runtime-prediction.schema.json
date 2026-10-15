@@ -71,6 +71,11 @@
         "string",
         "null"
       ]
+    },
+    "inferred_high_load_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
     }
   },
   "additionalProperties": true

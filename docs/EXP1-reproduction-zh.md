@@ -41,7 +41,7 @@ master IP 改變後，檢查 kubeconfig 的 server 位址、NFS PV `spec.nfs.ser
 
 正式 40 分鐘來源檔為 `examples/yolo26/formal-40min-source-job.yaml`，固定 1639 epochs、512 張合成 train 圖、batch 16、52,448 training iterations；兩份 `formal-40min-dryrun-120s.yaml` 用**同一完整 workload**，Nsight 只擷取前 120 秒。來源、兩份模板的 `model`、`batch`、`epochs`、`imgsz`、`amp`、`val`、`save`、`patience` 必須一致。此 repo 原有的 960-unit 比較屬另一個短 fixture，不能拿來驗證這份 52,448-unit Job。
 
-master 的模型由 CLI 決定。每個 candidate 都要指定相容 runtime JSON 和 node-bound power bundle；若省略 override，使用 cross-node YAML 的預設值。更換模型請用**新的 run ID 和輸出目錄**，保留原始模型檔與訓練來源。`cross-node-plan.json` 會記錄 runtime JSON、power manifest、ONNX、scaler 的 hash。現有模型仍為 deployment-smoke／`validation_required`，因此此排名明確是研究用 provisional 排名。
+master 的模型由 CLI 決定。每個 candidate 都要指定相容 runtime JSON 和 node-bound power bundle；若省略 override，使用 cross-node YAML 的預設值。更換模型請用**新的 run ID 和輸出目錄**，並記錄訓練來源與模型 SHA-256。`cross-node-plan.json` 會記錄 runtime JSON、power manifest、ONNX、scaler 的 hash。4090 預設改用 clean／compute-load soft-gate 模型，但尚缺同一筆 trace 的特徵抽取比對；現有模型仍為 deployment-smoke／`validation_required`，因此此排名明確是研究用 provisional 排名。
 
 ```bash
 export CTX="$(kubectl config current-context)"
@@ -50,7 +50,7 @@ export RUN=exp1-b16-r01
 CROSS_ARGS=(
   --mode cross-node --cross-node-config examples/yolo26/formal-cross-node-dryrun.yaml
   --run-id "$RUN" --worker-commit "$COMMIT" --output-dir "generated/$RUN"
-  --candidate-runtime-model iccl-s3-251230=models/runtime/RTX4090_yolo_trace_only_v1.json
+  --candidate-runtime-model iccl-s3-251230=models/runtime/RTX4090_yolo_soft_gate_v1.json
   --candidate-runtime-model mirc516-20250605=models/runtime/RTX5090_yolo_trace_only_v1.json
   --candidate-power-bundle iccl-s3-251230=models/power/bundles/pdu1-outlet1-20260416-20260612
   --candidate-power-bundle mirc516-20250605=models/power/bundles/pdu1-outlet7-20260416-20260612

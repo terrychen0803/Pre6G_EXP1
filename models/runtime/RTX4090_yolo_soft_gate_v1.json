@@ -1,0 +1,167 @@
+{
+  "device_id": "RTX4090",
+  "feature_names": [
+    "log_detected_period_ms",
+    "log_kernel_event_rate_hz",
+    "log_unique_kernel_count",
+    "log_median_kernel_duration_us",
+    "log_mean_kernel_duration_us",
+    "log_kernel_busy_fraction",
+    "anchor_robust_cv"
+  ],
+  "training_gate_strategy": "leave-one-workload-out cross-fitted soft scores",
+  "training_rows": 48,
+  "training_workloads": 24,
+  "target": "median unprofiled steady_window_mean_iter_ms; 3 clean and 5 loaded repeats",
+  "alpha_candidates": [
+    0.1,
+    1.0,
+    10.0
+  ],
+  "temperature_candidates": [
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0
+  ],
+  "detector_horizons_seconds": [
+    5,
+    7,
+    9,
+    12,
+    15,
+    20,
+    30
+  ],
+  "detector_deployment_horizons_seconds": [
+    7,
+    9,
+    12,
+    15,
+    20,
+    30
+  ],
+  "detector_min_confidence": 0.6,
+  "detector_stability_tolerance": 0.1,
+  "gate": {
+    "means": [
+      4.18824366653733,
+      10.724727888018881,
+      4.435576985665403,
+      0.149469376859577,
+      1.4065958146615218,
+      -1.6841868552847277,
+      0.04701186797135128
+    ],
+    "scales": [
+      0.34341592439589697,
+      0.5381465498154481,
+      0.14813803889500282,
+      0.05079872723391826,
+      0.6748508285054559,
+      0.747835204382937,
+      0.04021114505308682
+    ],
+    "centroids": {
+      "clean": [
+        -0.29527835190265733,
+        0.21023393223484663,
+        0.013779435199294433,
+        0.08869631778875504,
+        -0.08585461670303123,
+        0.07380985242426198,
+        -0.7749395663839288
+      ],
+      "high_load_01": [
+        0.29527835190265733,
+        -0.21023393223484868,
+        -0.013779435199294206,
+        -0.08869631778875497,
+        0.08585461670303116,
+        -0.07380985242426172,
+        0.7749395663839287
+      ]
+    },
+    "temperature": 2.0
+  },
+  "ridge": {
+    "means": [
+      4.18824366653733,
+      10.724727888018881,
+      4.435576985665403,
+      0.149469376859577,
+      1.4065958146615218,
+      -1.6841868552847277,
+      0.04701186797135128,
+      0.4515564801605292,
+      1.9578333491268585,
+      4.726530170021199,
+      2.0241152637165407,
+      0.06560006910599969,
+      0.6622319156518223,
+      -0.8497212335022162,
+      0.032093380934269444
+    ],
+    "scales": [
+      0.34341592439589697,
+      0.5381465498154481,
+      0.14813803889500282,
+      0.05079872723391826,
+      0.6748508285054559,
+      0.747835204382937,
+      0.04021114505308682,
+      0.323516809549176,
+      1.4960246250154177,
+      3.248638522204358,
+      1.4808550753206076,
+      0.051570693214873356,
+      0.6386648039372363,
+      0.8569985459113288,
+      0.04210548907307421
+    ],
+    "coefficients": [
+      3.9992361880975618,
+      0.22859099871375851,
+      -0.06501128142955072,
+      0.00827377666038243,
+      0.008338694046148483,
+      0.12313414826378431,
+      0.06433447488210288,
+      -0.0023044780552244604,
+      0.027120936931479486,
+      0.022603022367225462,
+      0.03866331919153315,
+      0.03218087835735939,
+      -0.022368748710240968,
+      -0.012348727447731238,
+      -0.004086273407519773,
+      -0.004247155689557222
+    ],
+    "alpha": 1.0
+  },
+  "source_sha256": {
+    "analysis\\rtx4090_20261016\\run_analysis.py": "2d1f966d3899be417da4b69a3d1504b73e5b7b9acb4a7d5f988661b0afca8d28",
+    "analysis\\rtx3090_20261015\\evaluate_and_freeze.py": "29bc7439b13860c2f1a9f3e113f618932f1a4d656959f25782d0679d2247e3e5",
+    "analysis\\rtx3090_20261015\\evaluate_crossfit_gate.py": "5f9a5c38f6cc5af8b00fe365404068cf9234d4e52f84b636f4da23f23dc82b96",
+    "analysis\\high_load_01\\evaluate_trace_event_periods.py": "dbf24e8888c58b72d69325468e172d084e25a8c962b00e063adec0844f7ec0c5",
+    "analysis\\high_load_01\\long_trace_period_detector.py": "3b1366ed64742c3cf896d22db89d66c75741add2250d54fd194952296e6cc652",
+    "analysis\\high_load_01\\run_trace_runtime_model.py": "fcb69595c551a464db60249357dd6f2a24bce8a4d30432855fc3d6d4f02e57c8",
+    "analysis\\high_load_01\\run_unified_trace_model.py": "8905d2af5dd0f206c229c85ee6e2ce88d135940441573c0f28d69fe44326afb4"
+  },
+  "model_type": "trace_soft_regime_interactions_crossfit_gate",
+  "schema_version": "pre6g.runtime-model/v2",
+  "model_id": "RTX4090_yolo_soft_gate_v1",
+  "role": "deployment-smoke",
+  "workload_family": "YOLO26",
+  "detector_profile": "yolo-v1",
+  "detected_unit": "execution_cycle",
+  "target_transform": "log",
+  "frozen_model_sha256": "395e1c947ac9ee9d033175e7ec51f6f741010912cf3742f0e73a9f09e5e729fa",
+  "limitations": [
+    "RTX4090 YOLO26 only",
+    "clean and compute-only high_load_01 training conditions",
+    "trace feature extraction parity with EXP1 has not been verified on the same trace",
+    "runtime per execution cycle; not full-job ETA"
+  ]
+}

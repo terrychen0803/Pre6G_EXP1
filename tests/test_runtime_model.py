@@ -14,9 +14,44 @@ from pre6g_experiment.runtime_model import (
 MODEL = Path(
     "models/runtime/RTX5090_yolo_trace_only_v1.json"
 )
+MODEL_4090 = Path("models/runtime/RTX4090_yolo_soft_gate_v1.json")
 
 
 class RuntimeModelTests(unittest.TestCase):
+    def test_4090_soft_gate_matches_frozen_reference(self):
+        model = load_model(MODEL_4090)
+        gate = model["gate"]
+        for condition, expected_score, expected_ms in (
+            ("clean", 0.1815933454732066, 46.492214348373416),
+            ("high_load_01", 0.8184066545267936, 65.75360910796043),
+        ):
+            with self.subTest(condition=condition):
+                values = [
+                    mean + scale * center
+                    for mean, scale, center in zip(
+                        gate["means"], gate["scales"], gate["centroids"][condition]
+                    )
+                ]
+                sample = {
+                    "device_id": "RTX4090",
+                    "detected_unit": "execution_cycle",
+                    "detector_profile": "yolo-v1",
+                    "trace_features": dict(zip(model["feature_names"], values)),
+                }
+                prediction = predict_runtime(model, sample)
+                self.assertAlmostEqual(prediction.predicted_runtime_ms, expected_ms, places=9)
+                self.assertAlmostEqual(prediction.inferred_high_load_score, expected_score, places=12)
+                self.assertEqual(prediction.feature_count, 7)
+
+    def test_4090_soft_gate_rejects_bad_dimensions(self):
+        model = load_model(MODEL_4090)
+        model["ridge"]["coefficients"].pop()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "bad-model.json"
+            path.write_text(json.dumps(model), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeModelError, "ridge.coefficients"):
+                load_model(path)
+
     def test_frozen_model_predicts_known_c03_smoke_value(self):
         model = load_model(MODEL)
 
