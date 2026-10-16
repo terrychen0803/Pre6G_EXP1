@@ -18,14 +18,31 @@ SPEC = importlib.util.spec_from_file_location("run_cross_node_dryrun", ROOT / "s
 assert SPEC and SPEC.loader
 DRYRUN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DRYRUN)
-CONFIG = ROOT / "examples/yolo26/cross-node-dryrun.yaml"
-FORMAL_CONFIG = ROOT / "examples/yolo26/formal-cross-node-dryrun.yaml"
+# Published examples contain no site identities. Test fixtures explicitly read
+# unchanged frozen bundle bindings into temporary files; no cluster access.
+_FIXTURE_DIR = tempfile.TemporaryDirectory(prefix="pre6g-offline-fixtures-")
+
+
+def bound_fixture(relative):
+    config = yaml.safe_load((ROOT / relative).read_text(encoding="utf-8"))
+    for candidate in config["candidates"]:
+        manifest = yaml.safe_load((ROOT / candidate["power_bundle"] / "manifest.yaml").read_text(encoding="utf-8"))
+        candidate["gpu_uuid"] = manifest["node_binding"]["gpu_uuid"]
+        candidate["power_binding_node"] = manifest["node_binding"]["kubernetes_node"]
+        candidate["netdata_url"] = "http://netdata-parent.example:19999/host/" + candidate["node"]
+    path = Path(_FIXTURE_DIR.name) / Path(relative).name
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return path
+
+
+CONFIG = bound_fixture("examples/yolo26/cross-node-dryrun.yaml")
+FORMAL_CONFIG = bound_fixture("examples/yolo26/formal-cross-node-dryrun.yaml")
 COMMIT = subprocess.check_output(["git", "-c", f"safe.directory={ROOT.as_posix()}", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
 
 class CrossNodeDryrunTests(unittest.TestCase):
     def test_master_model_override_records_hashes_and_rejects_unknown_node(self):
-        node = "iccl-s3-251230"
+        node = "worker-4090"
         runtime = "models/runtime/RTX4090_yolo_soft_gate_v1.json"
         bundle = "models/power/bundles/pdu1-outlet1-20260416-20260612"
         plan, _, _ = DRYRUN.prepare(FORMAL_CONFIG, run_id="model-switch-001", worker_commit=COMMIT,
@@ -87,9 +104,9 @@ class CrossNodeDryrunTests(unittest.TestCase):
         self.assertFalse(plan["production_result"])
         self.assertEqual(len(jobs), 2)
         self.assertEqual(collector["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"], "pre6g-artifacts")
-        self.assertEqual(plan["collector_node"], "icclz2")
-        self.assertEqual(collector["spec"]["nodeSelector"]["kubernetes.io/hostname"], "icclz2")
-        self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"] for job in jobs}, {"iccl-s3-251230", "mirc516-20250605"})
+        self.assertEqual(plan["collector_node"], "master-node")
+        self.assertEqual(collector["spec"]["nodeSelector"]["kubernetes.io/hostname"], "master-node")
+        self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"] for job in jobs}, {"worker-4090", "worker-5090"})
         for job in jobs:
             annotations = job["metadata"]["annotations"]
             self.assertEqual(annotations["pre6g.io/experiment-stage"], "functional-validation")
@@ -184,23 +201,27 @@ class CrossNodeDryrunTests(unittest.TestCase):
         def kubectl_result(command, **_kwargs):
             if command[:3] == ["kubectl", "config", "current-context"]:
                 return "test-context\n"
+            if "--raw" in command:
+                return "\n".join(f'{metric}{{UUID="{item["gpu_uuid"]}"}} 1'
+                    for item in plan["candidates"] for metric in ("DCGM_FI_DEV_GPU_UTIL",
+                    "DCGM_FI_DEV_FB_USED", "DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_POWER_USAGE"))
             if "pv" in command:
                 return json.dumps({"status": {"phase": "Bound"}, "spec": {"accessModes": ["ReadWriteMany"], "claimRef": {"namespace": "experiments", "name": "pre6g-artifacts"}, "nfs": {"server": "nfs.example", "path": "/srv/pre6g-artifacts"}}})
             if "pvc" in command:
-                return json.dumps({"status": {"phase": "Bound"}, "spec": {"accessModes": ["ReadWriteMany"], "volumeName": "pre6g-artifacts-nfs"}})
+                return json.dumps({"status": {"phase": "Bound"}, "spec": {"accessModes": ["ReadWriteMany"], "volumeName": "pre6g-artifacts-nfs", "storageClassName": "ceph-filesystem"}})
             if "jobs" in command:
                 return json.dumps({"items": []})
             if "node" in command:
-                return json.dumps({"status": {"conditions": [{"type": "Ready", "status": "True"}, {"type": "DiskPressure", "status": "False"}], "allocatable": {"nvidia.com/gpu.shared": "1"}}})
+                return json.dumps({"status": {"conditions": [{"type": "Ready", "status": "True"}, {"type": "DiskPressure", "status": "False"}], "allocatable": {"nvidia.com/gpu": "1"}}})
             if "pods" in command:
-                return json.dumps({"items": [{"spec": {"nodeName": item["node"]}, "status": {"phase": "Running", "podIP": f"10.42.0.{index + 1}", "conditions": [{"type": "Ready", "status": "True"}]}} for index, item in enumerate(plan["candidates"])]})
+                return json.dumps({"items": [{"metadata": {"name": "exporter-" + str(index)}, "spec": {"nodeName": item["node"]}, "status": {"phase": "Running", "podIP": f"192.0.2.{index + 1}", "conditions": [{"type": "Ready", "status": "True"}]}} for index, item in enumerate(plan["candidates"])]})
             return ""
 
         with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN.shutil, "which", return_value="kubectl"), patch.object(DRYRUN.subprocess, "run", side_effect=command_result), patch.object(DRYRUN, "_invoke", side_effect=kubectl_result) as invoke:
             resolved = DRYRUN._preflight(plan, jobs, "test-context", Path(raw))
-            self.assertEqual(invoke.call_count, 12)
+            self.assertEqual(invoke.call_count, 14)
             rendered = list(yaml.safe_load_all(resolved.read_text(encoding="utf-8")))
-            self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"]: next(row["value"] for row in job["spec"]["template"]["spec"]["containers"][0]["env"] if row["name"] == "DCGM_URL") for job in rendered}, {"iccl-s3-251230": "http://10.42.0.1:9400", "mirc516-20250605": "http://10.42.0.2:9400"})
+            self.assertEqual({job["spec"]["template"]["spec"]["nodeSelector"]["kubernetes.io/hostname"]: next(row["value"] for row in job["spec"]["template"]["spec"]["containers"][0]["env"] if row["name"] == "DCGM_URL") for job in rendered}, {"worker-4090": "http://192.0.2.1:9400", "worker-5090": "http://192.0.2.2:9400"})
 
     def test_dcgm_lookup_rejects_missing_node_exporter(self):
         plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
@@ -210,7 +231,7 @@ class CrossNodeDryrunTests(unittest.TestCase):
 
     def test_dcgm_lookup_rejects_not_ready_exporter(self):
         plan, _, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
-        pod = {"spec": {"nodeName": plan["candidates"][0]["node"]}, "status": {"phase": "Running", "podIP": "10.42.0.1", "conditions": [{"type": "Ready", "status": "False"}]}}
+        pod = {"spec": {"nodeName": plan["candidates"][0]["node"]}, "status": {"phase": "Running", "podIP": "192.0.2.1", "conditions": [{"type": "Ready", "status": "False"}]}}
         with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", return_value=json.dumps({"items": [pod]})):
             with self.assertRaisesRegex(RuntimeError, "not Running/Ready"):
                 DRYRUN._resolve_dcgm_urls(plan, "test-context", Path(raw))
@@ -220,14 +241,14 @@ class CrossNodeDryrunTests(unittest.TestCase):
         plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
         for job in jobs:
             env = {item["name"]: item for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
-            env["DCGM_URL"]["value"] = "http://10.42.0.1:9400"
+            env["DCGM_URL"]["value"] = "http://192.0.2.1:9400"
         pods = DRYRUN._smoke_pods(plan, jobs)
         self.assertEqual(len(pods), 2)
         for pod in pods:
             spec = pod["spec"]
             self.assertEqual(spec["runtimeClassName"], "nvidia")
             self.assertEqual(spec["activeDeadlineSeconds"], 300)
-            self.assertEqual(spec["containers"][0]["resources"]["requests"]["nvidia.com/gpu.shared"], "1")
+            self.assertEqual(spec["containers"][0]["resources"]["requests"]["nvidia.com/gpu"], "1")
             self.assertIn("nvidia-smi", spec["containers"][0]["command"][2])
             self.assertNotIn("yolo detect train", spec["containers"][0]["command"][2])
             self.assertEqual({volume["name"] for volume in spec["volumes"]}, {"artifacts", "nsys"})
@@ -237,7 +258,7 @@ class CrossNodeDryrunTests(unittest.TestCase):
         plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
         for job in jobs:
             env = {item["name"]: item for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
-            env["DCGM_URL"]["value"] = "http://10.42.0.1:9400"
+            env["DCGM_URL"]["value"] = "http://192.0.2.1:9400"
         pods = DRYRUN._smoke_pods(plan, jobs)
         queries = 0
 
@@ -329,7 +350,7 @@ class CrossNodeDryrunTests(unittest.TestCase):
                 payload = {"node": node, "device_id": next(row["device_id"] for row in plan["candidates"] if row["node"] == node), "model_id": f"runtime-{node}", "work_unit": "training_iteration", "total_work_units": 960, "predicted_runtime_ms_per_work_unit": 50 if node == plan["candidates"][0]["node"] else 100}
             else:
                 candidate = next(row for row in plan["candidates"] if row["node"] == node)
-                payload = {"bound_node": node, "bound_gpu_uuid": candidate["gpu_uuid"], "target_semantics": "node-total-power", "target_unit": "W", "model_id": f"power-{node}", "status": "validation_required", "range_exceeded": True, "range_warnings": ["reference range exceeded"], "observed_profile_window": {"time_weighted_mean_predicted_power_w": 100 if node == plan["candidates"][0]["node"] else 200}}
+                payload = {"bound_node": candidate["power_binding_node"], "bound_gpu_uuid": candidate["gpu_uuid"], "target_semantics": "node-total-power", "target_unit": "W", "model_id": f"power-{node}", "status": "validation_required", "range_exceeded": True, "range_warnings": ["reference range exceeded"], "observed_profile_window": {"time_weighted_mean_predicted_power_w": 100 if node == plan["candidates"][0]["node"] else 200}}
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps(payload), encoding="utf-8")
             return ""
@@ -367,7 +388,7 @@ class CrossNodeDryrunTests(unittest.TestCase):
                 (telemetry / "alignment-quality.json").write_text(json.dumps({"pass": True}), encoding="utf-8")
                 start = 1_000_000_000_000
                 (telemetry / "application-window.json").write_text(json.dumps({"schema_version": "pre6g.application-window/v1", "command": ["yolo", "detect", "train"], "started_at_unix_ns": start, "finished_at_unix_ns": start + 11_000_000_000}), encoding="utf-8")
-                (telemetry / "aligned-telemetry.csv").write_text("timestamp_ns,power\n" + "".join(f"{start + i * 1_000_000_000},100\n" for i in range(12)), encoding="utf-8")
+                (telemetry / "aligned-telemetry.csv").write_text("timestamp_ns,power,node,gpu_uuid\n" + "".join(f"{start + i * 1_000_000_000},100,{node},{item['gpu_uuid']}\n" for i in range(12)), encoding="utf-8")
             with patch.object(DRYRUN, "_invoke", side_effect=fake_inference):
                 DRYRUN._predict(plan, output)
             ranking_input = json.loads((output / "ranking-input.json").read_text(encoding="utf-8"))

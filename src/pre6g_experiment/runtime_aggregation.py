@@ -70,6 +70,8 @@ def aggregate_runtime(
     )
 
     return {
+        **({"inferred_high_load_score": runtime_prediction["inferred_high_load_score"]}
+           if "inferred_high_load_score" in runtime_prediction else {}),
         "schema_version": "pre6g.semantic-runtime/v1",
         "node": runtime_prediction.get("node"),
         "device_id": runtime_prediction.get("device_id"),

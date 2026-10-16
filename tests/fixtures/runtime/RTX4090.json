@@ -1,0 +1,44 @@
+{
+  "schema_version": "pre6g.runtime-features/v1",
+  "node": "worker-4090",
+  "device_id": "RTX4090",
+  "workload_id": "offline-frozen-reference",
+  "detected_unit": "execution_cycle",
+  "detector_profile": "yolo-v1",
+  "detected_period_ms": 59.551434133911634,
+  "detector_confidence": 0.8399946282048405,
+  "trace_features": {
+    "log_detected_period_ms": 4.086840378364582,
+    "log_kernel_event_rate_hz": 10.837864553305199,
+    "log_unique_kernel_count": 4.437618244172907,
+    "log_median_kernel_duration_us": 0.15397503691358091,
+    "log_mean_kernel_duration_us": 1.348656755448463,
+    "log_kernel_busy_fraction": -1.6289892492115552,
+    "anchor_robust_cv": 0.015850660660110916
+  },
+  "feature_names": [
+    "log_detected_period_ms",
+    "log_kernel_event_rate_hz",
+    "log_unique_kernel_count",
+    "log_median_kernel_duration_us",
+    "log_mean_kernel_duration_us",
+    "log_kernel_busy_fraction",
+    "anchor_robust_cv"
+  ],
+  "feature_vector": [
+    4.086840378364582,
+    10.837864553305199,
+    4.437618244172907,
+    0.15397503691358091,
+    1.348656755448463,
+    -1.6289892492115552,
+    0.015850660660110916
+  ],
+  "production_input_policy": {
+    "uses_iterations_csv": false,
+    "uses_nvtx": false,
+    "uses_callbacks": false,
+    "uses_epoch_labels": false,
+    "uses_batch_labels": false
+  }
+}

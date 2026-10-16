@@ -27,7 +27,7 @@ spec:
       restartPolicy: Never
 
       nodeSelector:
-        kubernetes.io/hostname: iccl-s3-251230
+        kubernetes.io/hostname: worker-4090
 
       containers:
         - name: profiler
@@ -43,30 +43,30 @@ spec:
               value: yolo26-formal-4090-120s-001
 
             - name: NODE_NAME
-              value: iccl-s3-251230
+              value: worker-4090
 
             - name: DEVICE_ID
               value: RTX4090
 
             - name: GPU_UUID
-              value: GPU-39ace77c-cb0f-dd47-ae6b-12014c25b1d1
+              value: REPLACE_WITH_VERIFIED_GPU_UUID
 
             - name: NETDATA_URL
-              value: http://netdata.netdata.svc.cluster.local:19999/host/ICCL-S3-251230
+              value: http://NETDATA_PARENT:19999/host/NETDATA_HOST_4090
 
             - name: DCGM_URL
-              value: http://10.42.3.65:9400
+              value: DCGM_ENDPOINT_UNRESOLVED
 
           resources:
             requests:
               cpu: "4"
               memory: 8Gi
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
 
             limits:
               cpu: "8"
               memory: 16Gi
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
 
           volumeMounts:
             - name: work
@@ -108,7 +108,7 @@ spec:
 
               echo
               echo "===== NSIGHT ====="
-              /opt/pre6g/nsight/bin/nsys --version
+              /opt/pre6g/nsight/target-linux-x64/nsys --version
 
               echo
               echo "===== FETCH PRE6G ====="
@@ -120,7 +120,7 @@ spec:
               cd "$REPO"
 
               git checkout \
-                97c2df54cc9e91f5c7252fd54224c5ccfc208a90
+                ab2a20c7ded276a179d48f48a1efcc5afdb4afad
 
               echo
               echo "===== PRE6G COMMIT ====="
@@ -221,7 +221,7 @@ spec:
                 --max-gap-s 2.0 \
                 --accept-command-returncode 143 \
                 -- \
-                /opt/pre6g/nsight/bin/nsys profile \
+                /opt/pre6g/nsight/target-linux-x64/nsys profile \
                   --trace=cuda,nvtx,osrt \
                   --sample=none \
                   --cpuctxsw=none \
@@ -251,7 +251,7 @@ spec:
               echo
               echo "===== NSIGHT EXPORT ====="
 
-              /opt/pre6g/nsight/bin/nsys export \
+              /opt/pre6g/nsight/target-linux-x64/nsys export \
                 --type=sqlite \
                 --output="$LOCAL/profile.sqlite" \
                 "$LOCAL/profile.nsys-rep"
@@ -350,5 +350,5 @@ spec:
 
         - name: nsys
           hostPath:
-            path: /opt/nvidia/nsight-systems-cli/2026.4.1
+            path: /opt/nvidia/nsight-systems-cli/2026.5.1
             type: Directory

@@ -1,3 +1,35 @@
+# Pre6G_EXP1 目前架構（RKE2）
+
+Master 是 orchestrator 與 model inference 端；GPU Worker 負責原始 YOLO26 workload、Nsight CUDA trace、marker-free detection 和 Trace Features 抽取。共享 PVC 讓資料依 run/node 分離並可由 Master readback。流程目前是 CLI 研究原型，provisional ranking 不會自動部署 production Job。
+
+```mermaid
+flowchart TD
+  C[Master: config / frozen commit / preflight] --> P[Parallel 120s Profile Jobs]
+  P --> W1[RTX4090 Worker]
+  P --> W2[RTX5090 Worker]
+  N[Netdata Child → Parent history: CPU / memory / temperature / apps] --> W1
+  N --> W2
+  D[Per-node DCGM: GPU UUID metrics, 1 Hz] --> W1
+  D --> W2
+  W1 --> A[CephFS RWX: raw Nsight reports, trace features, telemetry, provenance]
+  W2 --> A
+  A --> M[Master Collector: hashes / identity / quality gates]
+  M --> R[Runtime: 4090 soft-gate v2 + 5090 ridge v1, yolo-v1]
+  M --> E[Node-bound Power ONNX + frozen scaler]
+  R --> K[Provisional ranking]
+  E --> K
+  K --> G[All candidate nodes: identical unprofiled full trainer Jobs]
+  G --> V[PDU + container execution window: Ground Truth evaluation]
+```
+
+Netdata 是歷史 system/CPU 資料來源；DCGM 依 Node/實體 UUID 發現 exporter 並主動輪詢；Nsight 是 target-process CUDA 行為資料來源，不取代 PDU 整機電力。`yolo-v2-long` 是旁路診斷，Frozen Runtime features 保持 `yolo-v1`。Master Collector 可明確容忍 control-plane/master taint，支援 Bound RWX CSI/CephFS 或 NFS。
+
+Dry-run → Profiling → Prediction → Ground Truth 各有獨立驗收 gate。本次僅離線驗證；RKE2 CUDA Trace/GPU Metrics、4090 同 Trace 抽取一致性與正式跨節點 Scheduling 未驗證。部署說明以 [Environment Setup](environment-setup.md)、[Configuration](configuration.md)、[Data Collection Guide](data-collection-guide.md) 為準。
+
+以下為原始架構設計與歷史基線；舊 k3s/NFS/節點名或 production 願景不代表本次已實現／已驗證狀態。
+
+---
+
 # 系統架構
 
 ## 核心原則

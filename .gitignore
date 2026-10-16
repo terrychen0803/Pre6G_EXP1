@@ -6,3 +6,6 @@ __pycache__/
 testdeps/
 artifacts/
 generated/
+configs/*.local.yaml
+configs/*.local.env
+*.egg-info/

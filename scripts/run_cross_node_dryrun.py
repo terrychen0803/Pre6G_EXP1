@@ -38,6 +38,12 @@ ARTIFACTS = (
     "telemetry/aligned-telemetry.csv",
     "telemetry/alignment-quality.json",
     "telemetry/application-window.json",
+    "telemetry/netdata.csv",
+    "telemetry/dcgm.csv",
+    "telemetry/timestamps.json",
+    "provenance/worker.txt",
+    "profile.nsys-rep",
+    "profile.sqlite",
 )
 LONG_DETECTOR_ARTIFACTS = (
     "detector-v2/trajectory.json",
@@ -63,7 +69,7 @@ def command(*args):
 visible = command("nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader").splitlines()
 if gpu_uuid not in [value.strip() for value in visible]:
     raise RuntimeError("expected GPU UUID is not visible inside this Pod")
-nsight_version = command("/opt/pre6g/nsight/bin/nsys", "--version")
+nsight_version = command("/opt/pre6g/nsight/target-linux-x64/nsys", "--version")
 command("git", "ls-remote", "https://github.com/terrychen0803/Pre6G_EXP1.git", "HEAD")
 
 with urllib.request.urlopen(os.environ["DCGM_URL"].rstrip("/") + "/metrics", timeout=15) as response:
@@ -213,8 +219,32 @@ def prepare(
     if not COMMIT.fullmatch(worker_commit):
         raise ValueError("worker_commit must be a full lowercase 40-character Git SHA")
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or config.get("schema_version") != "pre6g.cross-node-dryrun-config/v1":
+    if not isinstance(config, dict) or config.get("schema_version") not in {"pre6g.cross-node-dryrun-config/v1", "pre6g.cross-node-dryrun-config/v2"}:
         raise ValueError("unsupported cross-node dry-run config schema")
+    deployment = config.get("deployment")
+    if config["schema_version"].endswith("/v2") and not isinstance(deployment, dict):
+        raise ValueError("v2 config requires explicit deployment settings")
+    if deployment is not None and not {"gpu_resource", "gpu_count", "runtime_class", "nsight_host_path", "nsight_cli"}.issubset(deployment):
+        raise ValueError("deployment is missing required GPU/RuntimeClass/Nsight settings")
+    deployment = deployment if deployment is not None else {
+        "gpu_resource": "nvidia.com/gpu.shared", "gpu_count": 1,
+        "runtime_class": "nvidia", "nsight_host_path": "/opt/nvidia/nsight-systems-cli/2026.4.1",
+        "nsight_cli": "/opt/pre6g/nsight/bin/nsys",
+    }
+    resource = str(deployment["gpu_resource"])
+    count = deployment["gpu_count"]
+    if resource not in {"nvidia.com/gpu", "nvidia.com/gpu.shared"} or type(count) is not int or count < 1:
+        raise ValueError("invalid deployment GPU resource/count")
+    for key in ("nsight_host_path", "nsight_cli"):
+        value = str(deployment[key])
+        if not value.startswith("/") or not re.fullmatch(r"[A-Za-z0-9/_.-]+", value):
+            raise ValueError(f"invalid deployment {key}")
+    _name(str(deployment["runtime_class"]), "runtime_class")
+    if not str(deployment["nsight_cli"]).startswith("/opt/pre6g/nsight/"):
+        raise ValueError("nsight_cli must be inside the /opt/pre6g/nsight mount")
+    tolerations = config.get("collector_tolerations", [])
+    if not isinstance(tolerations, list) or any(not isinstance(t, dict) for t in tolerations):
+        raise ValueError("collector_tolerations must be a list of Kubernetes tolerations")
     namespace = _name(str(config["namespace"]), "namespace")
     pvc = _name(str(config["artifact_pvc"]), "artifact_pvc")
     collector_node = _name(str(config["collector_node"]), "collector_node")
@@ -248,6 +278,15 @@ def prepare(
     source = yaml.safe_load(source_job.read_text(encoding="utf-8"))
     if source.get("apiVersion") != "batch/v1" or source.get("kind") != "Job":
         raise ValueError("source_job must be batch/v1 Job")
+    if source.get("metadata", {}).get("namespace") != namespace:
+        raise ValueError("source Job namespace differs from config; update the deployment source copy")
+    if config["schema_version"].endswith("/v2"):
+        app = source["spec"]["template"]["spec"]["containers"][0]
+        for section in ("requests", "limits"):
+            resources = app.get("resources", {}).get(section, {})
+            if str(resources.get(resource)) != str(count) or any(
+                    key != resource and key in {"nvidia.com/gpu", "nvidia.com/gpu.shared"} for key in resources):
+                raise ValueError("source Job GPU resource/count differs from deployment config")
     source_annotations = source.get("metadata", {}).get("annotations", {})
     if (source_annotations.get("pre6g.io/experiment-stage") != experiment_stage
             or source_annotations.get("pre6g.io/test-purpose") != test_purpose
@@ -351,6 +390,37 @@ def prepare(
                     f"{template_path}: formal profile must declare "
                     "pre6g.io/formal-workload-revision=v2-training-only"
                 )
+        if config["schema_version"].endswith("/v2"):
+            # Resolve deployment only; preserve workload text and frozen models.
+            job["metadata"]["namespace"] = namespace
+            pod = job["spec"]["template"]["spec"]
+            pod.setdefault("nodeSelector", {})["kubernetes.io/hostname"] = node
+            pod["runtimeClassName"] = deployment["runtime_class"]
+            app = pod["containers"][0]
+            env = _env(app)
+            for key, value in {"NODE_NAME": node, "DEVICE_ID": item["device_id"],
+                               "GPU_UUID": item["gpu_uuid"], "NETDATA_URL": item["netdata_url"]}.items():
+                env[key]["value"] = value
+            if not re.fullmatch(r"GPU-[a-fA-F0-9-]+", item["gpu_uuid"]):
+                raise ValueError(f"{node}: GPU UUID is invalid or a placeholder")
+            if not re.fullmatch(r"https?://[^\s]+/host/[^/\s]+", item["netdata_url"]):
+                raise ValueError(f"{node}: Netdata URL must select a Parent host")
+            for section in ("requests", "limits"):
+                override = (item.get("resources") or {}).get(section, {})
+                if set(override) - {"cpu", "memory"}:
+                    raise ValueError("candidate resource overrides allow only cpu and memory")
+                resources = app.setdefault("resources", {}).setdefault(section, {})
+                resources.pop("nvidia.com/gpu", None)
+                resources.pop("nvidia.com/gpu.shared", None)
+                resources[resource] = str(count)
+                resources.update(override)
+            for volume in pod.get("volumes", []):
+                if volume["name"] == "artifacts":
+                    volume["persistentVolumeClaim"]["claimName"] = pvc
+                if volume["name"] == "nsys":
+                    volume["hostPath"]["path"] = deployment["nsight_host_path"]
+            app["command"][2] = app["command"][2].replace(
+                "/opt/pre6g/nsight/target-linux-x64/nsys", deployment["nsight_cli"])
         if job["metadata"].get("namespace") != namespace:
             raise ValueError(f"{node}: profile template namespace differs from config")
         spec = job["spec"]["template"]["spec"]
@@ -363,13 +433,21 @@ def prepare(
         values = _env(container)
         if values["NODE_NAME"].get("value") != node or values["DEVICE_ID"].get("value") != item["device_id"]:
             raise ValueError(f"{node}: profile template identity differs from config")
-        if spec.get("runtimeClassName") != "nvidia":
+        if spec.get("runtimeClassName") != deployment["runtime_class"]:
             raise ValueError(f"{node}: profile template must use the validated nvidia RuntimeClass")
         requests = container.get("resources", {}).get("requests", {})
         limits = container.get("resources", {}).get("limits", {})
-        if requests.get("nvidia.com/gpu.shared") != "1" or limits.get("nvidia.com/gpu.shared") != "1":
+        if requests.get(resource) != str(count) or limits.get(resource) != str(count):
             raise ValueError(f"{node}: profile template must request one validated shared GPU")
+        volumes = {v["name"]: v for v in spec.get("volumes", [])}
+        if volumes.get("nsys", {}).get("hostPath", {}).get("path") != deployment["nsight_host_path"]:
+            raise ValueError(f"{node}: Nsight hostPath differs from deployment config")
+        if any(key != resource and key in {"nvidia.com/gpu", "nvidia.com/gpu.shared"}
+               for key in (*requests, *limits)):
+            raise ValueError(f"{node}: mixed GPU resource settings")
         original = _command_text(job)
+        if deployment["nsight_cli"] not in original:
+            raise ValueError(f"{node}: Nsight CLI differs from deployment config")
         if long_detector_profile and "scripts/evaluate_long_trace_periods.py" not in original:
             raise ValueError(f"{node}: profile template lacks {long_detector_profile} diagnostic")
         if len(CHECKOUT.findall(original)) != 1:
@@ -404,12 +482,31 @@ def prepare(
             original,
         )
         container["command"][2] = CHECKOUT.sub(lambda match: match.group(1) + worker_commit, wrapped)
+        provenance = r"""
+mkdir -p "$SHARED/provenance"
+{ git rev-parse HEAD; python3 --version; uname -a;
+  nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader;
+  NSIGHT_CLI --version; } > "$SHARED/provenance/worker.txt"
+nvidia-smi --query-gpu=uuid --format=csv,noheader | grep -Fx -- "$GPU_UUID" >/dev/null
+""".replace("NSIGHT_CLI", deployment["nsight_cli"])
+        # Run identity checks before data generation/profiling, after pinned checkout.
+        command = container["command"][2]
+        # YAML block scalars are dedented by the parser.
+        marker = 'echo "===== CREATE DATASET ====="'
+        if marker not in command:
+            raise ValueError(f"{node}: template lacks dataset setup boundary")
+        command = command.replace(marker, provenance + "\n" + marker, 1)
+        final_marker = 'echo "===== FINAL ARTIFACTS ====="'
+        if final_marker not in command:
+            raise ValueError(f"{node}: template lacks final artifact boundary")
+        container["command"][2] = command.replace(final_marker,
+            'cp "$LOCAL/profile.nsys-rep" "$LOCAL/profile.sqlite" "$SHARED/"\n' + final_marker, 1)
         values["TASK_ID"]["value"] = run_id
         # An old exporter Pod IP in the formal template must never be submitted.
         # The live endpoint is resolved against the target node at preflight.
         values["DCGM_URL"]["value"] = "DCGM_ENDPOINT_UNRESOLVED"
         manifest = yaml.safe_load((power_bundle / "manifest.yaml").read_text(encoding="utf-8"))
-        if manifest.get("node_binding", {}).get("kubernetes_node") != node:
+        if manifest.get("node_binding", {}).get("kubernetes_node") != item.get("power_binding_node", node):
             raise ValueError(f"{node}: power bundle is bound to another node")
         if manifest.get("node_binding", {}).get("gpu_uuid") != values["GPU_UUID"].get("value"):
             raise ValueError(f"{node}: power bundle GPU UUID differs from profile Job")
@@ -436,6 +533,10 @@ def prepare(
             "power_model_sha256": _digest(power_bundle / "model.onnx"),
             "power_scaler_sha256": _digest(power_bundle / "scaler.json"),
             "gpu_uuid": values["GPU_UUID"]["value"],
+            "power_binding_node": manifest["node_binding"]["kubernetes_node"],
+            "runtime_model_id": model["model_id"],
+            "runtime_model_schema": model["schema_version"],
+            "detector_profile": model["detector_profile"],
         })
     if len(workload_commands) != 1:
         raise ValueError("candidate templates have different profiling commands or workloads")
@@ -448,6 +549,7 @@ def prepare(
         "metadata": {"name": collector_name, "namespace": namespace, "labels": {"pre6g.io/dryrun-id": run_id}},
         "spec": {
             "restartPolicy": "Never", "activeDeadlineSeconds": 1800,
+            "tolerations": tolerations,
             "nodeSelector": {"kubernetes.io/hostname": collector_node},
             "containers": [{
                 "name": "collector", "image": collector_image,
@@ -462,6 +564,8 @@ def prepare(
         "schema_version": "pre6g.cross-node-dryrun-plan/v1",
         "run_id": run_id,
         "namespace": namespace,
+        "deployment": deployment,
+        "collector_tolerations": tolerations,
         "worker_commit": worker_commit,
         "source_job": str(source_job),
         "source_job_sha256": _digest(source_job),
@@ -483,6 +587,7 @@ def prepare(
         "candidates": plan_candidates,
         "ranking_mode": "research-provisional-model-output",
         "production_ready": False,
+        "binding_policy": "explicit hostname alias with unchanged physical GPU UUID; power validation still required",
         "deployment_policy": "plan-only unless --execute and explicit --kube-context are provided",
     }
     return plan, rendered, collector
@@ -528,7 +633,8 @@ def _resolve_dcgm_urls(plan: dict[str, Any], context: str, output: Path) -> dict
     urls: dict[str, str] = {}
     for item in plan["candidates"]:
         node = item["node"]
-        matches = [pod for pod in pods if pod.get("spec", {}).get("nodeName") == node]
+        matches = [pod for pod in pods if pod.get("spec", {}).get("nodeName") == node
+                   and not pod.get("metadata", {}).get("deletionTimestamp")]
         if len(matches) != 1:
             raise RuntimeError(f"{node}: expected exactly one DCGM exporter Pod, found {len(matches)}")
         pod = matches[0]
@@ -538,8 +644,27 @@ def _resolve_dcgm_urls(plan: dict[str, Any], context: str, output: Path) -> dict
             raise RuntimeError(f"{node}: DCGM exporter Pod is not Running/Ready with a Pod IP")
         address = ipaddress.ip_address(status["podIP"])
         host = f"[{address}]" if address.version == 6 else str(address)
+        pod_name = pod["metadata"]["name"]
+        metrics = _invoke(_kubectl(context, "get", "--raw",
+            f"/api/v1/namespaces/{exporter['namespace']}/pods/{pod_name}:{exporter['port']}/proxy/metrics"),
+            cwd=output, log=output / "logs" / "kubectl.log")
+        for metric in ("DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_FB_USED",
+                       "DCGM_FI_DEV_GPU_TEMP", "DCGM_FI_DEV_POWER_USAGE"):
+            samples = [line for line in metrics.splitlines() if line.startswith(metric + "{")
+                       and f'UUID="{item["gpu_uuid"]}"' in line]
+            if len(samples) != 1:
+                raise RuntimeError(f"{node}: DCGM metric {metric} must uniquely match expected GPU UUID")
         urls[node] = f"http://{host}:{exporter['port']}"
     return urls
+
+
+def _tolerates(taint: dict[str, Any], tolerance: dict[str, Any]) -> bool:
+    if tolerance.get("effect") and tolerance["effect"] != taint.get("effect"):
+        return False
+    if tolerance.get("operator", "Equal") == "Exists":
+        return not tolerance.get("key") or tolerance["key"] == taint.get("key")
+    return (tolerance.get("key") == taint.get("key")
+            and tolerance.get("value", "") == taint.get("value", ""))
 
 
 def _preflight(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, output: Path) -> Path:
@@ -558,7 +683,7 @@ def _preflight(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
         raise RuntimeError(f"current kube context {current!r} differs from required {context!r}")
     namespace = plan["namespace"]
     _invoke(_kubectl(context, "get", "namespace", namespace, "-o", "json"), cwd=output, log=log)
-    _invoke(_kubectl(context, "get", "runtimeclass", "nvidia", "-o", "json"), cwd=output, log=log)
+    _invoke(_kubectl(context, "get", "runtimeclass", plan["deployment"]["runtime_class"], "-o", "json"), cwd=output, log=log)
     pvc = json.loads(_invoke(_kubectl(context, "-n", namespace, "get", "pvc", plan["artifact_pvc"], "-o", "json"), cwd=output, log=log))
     if pvc.get("status", {}).get("phase") != "Bound" or "ReadWriteMany" not in pvc.get("spec", {}).get("accessModes", []):
         raise RuntimeError("artifact PVC must be Bound and ReadWriteMany for simultaneous cross-node profiles")
@@ -569,10 +694,15 @@ def _preflight(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
     pv_spec = pv.get("spec", {})
     claim = pv_spec.get("claimRef", {})
     nfs = pv_spec.get("nfs", {})
+    csi = pv_spec.get("csi", {})
+    storage_class = plan["deployment"].get("storage_class")
+    if storage_class and pvc.get("spec", {}).get("storageClassName") != storage_class:
+        raise RuntimeError("artifact PVC storageClassName differs from deployment config")
     if (pv.get("status", {}).get("phase") != "Bound" or "ReadWriteMany" not in pv_spec.get("accessModes", [])
             or claim.get("namespace") != namespace or claim.get("name") != plan["artifact_pvc"]
-            or not nfs.get("server") or not nfs.get("path")):
-        raise RuntimeError("artifact PV must be a Bound RWX NFS volume claimed by this namespace/PVC")
+            or not ((nfs.get("server") and nfs.get("path")) or
+                    (csi.get("driver") and csi.get("volumeHandle")))):
+        raise RuntimeError("artifact PV must be a Bound RWX NFS or CSI volume claimed by this namespace/PVC")
     collector_node = json.loads(_invoke(_kubectl(context, "get", "node", plan["collector_node"], "-o", "json"), cwd=output, log=log))
     collector_conditions = collector_node.get("status", {}).get("conditions", [])
     collector_ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in collector_conditions)
@@ -583,6 +713,7 @@ def _preflight(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
     blocking_taints = [
         taint for taint in collector_node.get("spec", {}).get("taints", [])
         if taint.get("effect") in {"NoSchedule", "NoExecute"}
+        and not any(_tolerates(taint, tolerance) for tolerance in plan.get("collector_tolerations", []))
     ]
     if blocking_taints:
         rendered_taints = ", ".join(
@@ -596,7 +727,7 @@ def _preflight(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
     for item in plan["candidates"]:
         node = json.loads(_invoke(_kubectl(context, "get", "node", item["node"], "-o", "json"), cwd=output, log=log))
         ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in node.get("status", {}).get("conditions", []))
-        if not ready or int(node.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu.shared", "0")) < 1:
+        if not ready or int(node.get("status", {}).get("allocatable", {}).get(plan["deployment"]["gpu_resource"], "0")) < plan["deployment"]["gpu_count"]:
             raise RuntimeError(f"{item['node']}: node is not Ready or has no allocatable shared GPU")
         if any(c.get("type") == "DiskPressure" and c.get("status") == "True" for c in node.get("status", {}).get("conditions", [])):
             raise RuntimeError(f"{item['node']}: node reports DiskPressure")
@@ -628,7 +759,7 @@ def _smoke_pods(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> list[dict[s
         volumes = {volume["name"]: volume for volume in source_spec.get("volumes", [])}
         if volumes.get("artifacts", {}).get("persistentVolumeClaim", {}).get("claimName") != plan["artifact_pvc"]:
             raise ValueError(f"{node}: artifact PVC mount is missing")
-        if volumes.get("nsys", {}).get("hostPath", {}).get("path") != "/opt/nvidia/nsight-systems-cli/2026.4.1":
+        if volumes.get("nsys", {}).get("hostPath", {}).get("path") != plan["deployment"]["nsight_host_path"]:
             raise ValueError(f"{node}: Nsight hostPath differs from validated path")
         peer = nodes[(index + 1) % len(nodes)]
         pod = {
@@ -646,7 +777,8 @@ def _smoke_pods(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> list[dict[s
                     "name": "smoke", "image": source_container["image"],
                     "imagePullPolicy": source_container.get("imagePullPolicy", "IfNotPresent"),
                     "securityContext": source_container.get("securityContext", {}),
-                    "command": ["python3", "-c", SMOKE_PROGRAM],
+                    "command": ["python3", "-c", SMOKE_PROGRAM.replace(
+                        "/opt/pre6g/nsight/target-linux-x64/nsys", plan["deployment"]["nsight_cli"])],
                     "env": [
                         {"name": "RUN_ID", "value": plan["run_id"]},
                         {"name": "NODE_NAME", "value": node},
@@ -654,8 +786,8 @@ def _smoke_pods(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> list[dict[s
                         *[{"name": name, "value": values[name]["value"]} for name in ("GPU_UUID", "NETDATA_URL", "DCGM_URL")],
                     ],
                     "resources": {
-                        "requests": {"cpu": "250m", "memory": "512Mi", "nvidia.com/gpu.shared": "1"},
-                        "limits": {"cpu": "1", "memory": "1Gi", "nvidia.com/gpu.shared": "1"},
+                        "requests": {"cpu": "250m", "memory": "512Mi", plan["deployment"]["gpu_resource"]: str(plan["deployment"]["gpu_count"])},
+                        "limits": {"cpu": "1", "memory": "1Gi", plan["deployment"]["gpu_resource"]: str(plan["deployment"]["gpu_count"])},
                     },
                     "volumeMounts": [
                         {"name": "artifacts", "mountPath": "/shared"},
@@ -781,12 +913,17 @@ def _collect(plan: dict[str, Any], context: str, output: Path) -> None:
                 # mistaken for a second Kubernetes pod:path argument.
                 local = destination.relative_to(output).as_posix()
                 _invoke(_kubectl(context, "-n", namespace, "cp", source, local, "-c", "collector"), cwd=output, log=log)
+            _write_json(target / "artifact-inventory.json", {
+                "schema_version": "pre6g.artifact-inventory/v1", "run_id": plan["run_id"],
+                "node": item["node"], "gpu_uuid": item["gpu_uuid"], "worker_commit": plan["worker_commit"],
+                "sha256": {relative: _digest(target / relative) for relative in artifacts},
+            })
     finally:
         if created:
             _invoke(_kubectl(context, "-n", namespace, "delete", "pod", collector, "--wait=false"), cwd=output, log=log)
 
 
-def _crop_telemetry(source: Path, window_path: Path, destination: Path) -> dict[str, Any]:
+def _crop_telemetry(source: Path, window_path: Path, destination: Path, *, expected_node: str | None = None, expected_uuid: str | None = None) -> dict[str, Any]:
     window = _json(window_path)
     if window.get("schema_version") != "pre6g.application-window/v1":
         raise ValueError("missing validated application-window schema")
@@ -803,6 +940,10 @@ def _crop_telemetry(source: Path, window_path: Path, destination: Path) -> dict[
             raise ValueError("aligned telemetry lacks timestamp_ns")
         all_rows = list(reader)
     selected = [row for row in all_rows if start <= int(row["timestamp_ns"]) <= end]
+    if expected_node is not None and any(row.get("node") != expected_node for row in selected):
+        raise ValueError("aligned telemetry node binding mismatch")
+    if expected_uuid is not None and any(row.get("gpu_uuid") != expected_uuid for row in selected):
+        raise ValueError("aligned telemetry GPU UUID binding mismatch")
     if len(selected) < 10:
         raise ValueError("fewer than ten aligned telemetry samples in application window")
     selected.sort(key=lambda row: int(row["timestamp_ns"]))
@@ -831,6 +972,13 @@ def _crop_telemetry(source: Path, window_path: Path, destination: Path) -> dict[
 
 
 def _predict(plan: dict[str, Any], output: Path) -> None:
+    for item in plan["candidates"]:
+        for field, path in (("runtime_model", Path(item["runtime_model"])),
+                            ("power_manifest", Path(item["power_bundle"]) / "manifest.yaml"),
+                            ("power_model", Path(item["power_bundle"]) / "model.onnx"),
+                            ("power_scaler", Path(item["power_bundle"]) / "scaler.json")):
+            if _digest(path) != item[field + "_sha256"]:
+                raise ValueError(f"{item['node']}: frozen artifact changed after planning: {field}")
     discovery = output / "workload-discovery.json"
     _invoke([sys.executable, str(ROOT / "scripts" / "discover_work.py"), "--job", plan["source_job"], "--output", str(discovery)], cwd=ROOT, log=output / "logs" / "prediction.log", env=_environment())
     work = _json(discovery)["work"]
@@ -854,7 +1002,7 @@ def _predict(plan: dict[str, Any], output: Path) -> None:
         result = output / "predictions" / node
         result.mkdir(parents=True, exist_ok=True)
         cropped = result / "application-aligned-telemetry.csv"
-        crop = _crop_telemetry(artifacts / "telemetry" / "aligned-telemetry.csv", artifacts / "telemetry" / "application-window.json", cropped)
+        crop = _crop_telemetry(artifacts / "telemetry" / "aligned-telemetry.csv", artifacts / "telemetry" / "application-window.json", cropped, expected_node=node, expected_uuid=item["gpu_uuid"])
         _write_json(result / "power-window-crop.json", crop)
         log = output / "logs" / f"predict-{node}.log"
         commands = [
@@ -868,7 +1016,7 @@ def _predict(plan: dict[str, Any], output: Path) -> None:
         power = _json(result / "power-summary.json")
         if runtime.get("node") != node or runtime.get("total_work_units") != work["total_units"] or runtime.get("work_unit") != work["unit"]:
             raise ValueError(f"{node}: semantic runtime is not comparable to source Job")
-        if power.get("bound_node") != node or power.get("bound_gpu_uuid") != item["gpu_uuid"] or power.get("target_semantics") != "node-total-power" or power.get("target_unit") != "W":
+        if power.get("bound_node") != item["power_binding_node"] or power.get("bound_gpu_uuid") != item["gpu_uuid"] or power.get("target_semantics") != "node-total-power" or power.get("target_unit") != "W":
             raise ValueError(f"{node}: node-bound power target does not match candidate")
         representative = power.get("observed_profile_window", {}).get("time_weighted_mean_predicted_power_w")
         runtime_ms = float(runtime["predicted_runtime_ms_per_work_unit"])
@@ -883,7 +1031,11 @@ def _predict(plan: dict[str, Any], output: Path) -> None:
                 raise ValueError(f"{node}: long detector diagnostic identity/policy mismatch")
         candidates.append({
             "node": node, "device_id": item["device_id"],
-            "runtime": {"model_id": runtime["model_id"], "predicted_runtime_ms_per_work_unit": runtime_ms},
+            "power_binding_node": item["power_binding_node"],
+            "gpu_uuid": item["gpu_uuid"],
+            "runtime": {"model_id": runtime["model_id"], "predicted_runtime_ms_per_work_unit": runtime_ms,
+                        **({"inferred_high_load_score": runtime["inferred_high_load_score"]}
+                           if "inferred_high_load_score" in runtime else {})},
             "long_detector_diagnostic": long_diagnostic,
             "power": {
                 "model_id": power["model_id"], "predicted_node_total_steady_power_w": watts,

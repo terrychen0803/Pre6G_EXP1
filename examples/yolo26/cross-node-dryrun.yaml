@@ -1,22 +1,42 @@
-# Functional/integration validation fixture only. Not the formal 30-50 minute experiment.
-schema_version: pre6g.cross-node-dryrun-config/v1
+# Anonymized RKE2 template. Copy privately and fill verified site bindings before planning.
+schema_version: pre6g.cross-node-dryrun-config/v2
 namespace: experiments
 source_job: examples/yolo26/validation-source-job.yaml
 artifact_pvc: pre6g-artifacts
 collector_image: busybox:1.36
-collector_node: icclz2
+collector_node: master-node
 dcgm_exporter:
-  namespace: gpu-monitoring
-  label_selector: app.kubernetes.io/name=dcgm-exporter
+  namespace: gpu-operator
+  label_selector: app=nvidia-dcgm-exporter
   port: 9400
 candidates:
-  - node: iccl-s3-251230
-    device_id: RTX4090
-    profile_job_template: k8s/formal/yolo26-rtx4090-formal-120s.yaml
-    runtime_model: models/runtime/RTX4090_yolo_soft_gate_v1.json
-    power_bundle: models/power/bundles/pdu1-outlet1-20260416-20260612
-  - node: mirc516-20250605
-    device_id: RTX5090
-    profile_job_template: k8s/formal/yolo26-rtx5090-formal-120s.yaml
-    runtime_model: models/runtime/RTX5090_yolo_trace_only_v1.json
-    power_bundle: models/power/bundles/pdu1-outlet7-20260416-20260612
+- node: worker-4090
+  device_id: RTX4090
+  profile_job_template: k8s/formal/yolo26-rtx4090-formal-120s.yaml
+  runtime_model: models/runtime/RTX4090_yolo_soft_gate_v1.json
+  power_bundle: models/power/bundles/pdu1-outlet1-20260416-20260612
+  gpu_uuid: REPLACE_WITH_VERIFIED_GPU_UUID
+  netdata_url: http://NETDATA_PARENT:19999/host/REPLACE_NETDATA_HOST
+  power_binding_node: REPLACE_WITH_MANIFEST_NODE
+- node: worker-5090
+  device_id: RTX5090
+  profile_job_template: k8s/formal/yolo26-rtx5090-formal-120s.yaml
+  runtime_model: models/runtime/RTX5090_yolo_trace_only_v1.json
+  power_bundle: models/power/bundles/pdu1-outlet7-20260416-20260612
+  gpu_uuid: REPLACE_WITH_VERIFIED_GPU_UUID
+  netdata_url: http://NETDATA_PARENT:19999/host/REPLACE_NETDATA_HOST
+  power_binding_node: REPLACE_WITH_MANIFEST_NODE
+collector_tolerations:
+- key: node-role.kubernetes.io/control-plane
+  operator: Exists
+  effect: NoSchedule
+- key: node-role.kubernetes.io/master
+  operator: Exists
+  effect: NoSchedule
+deployment:
+  gpu_resource: nvidia.com/gpu
+  gpu_count: 1
+  runtime_class: nvidia
+  nsight_host_path: /opt/nvidia/nsight-systems-cli/2026.5.1
+  nsight_cli: /opt/pre6g/nsight/target-linux-x64/nsys
+  storage_class: ceph-filesystem

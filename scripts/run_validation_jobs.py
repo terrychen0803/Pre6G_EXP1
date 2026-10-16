@@ -105,10 +105,19 @@ def main() -> int:
         current = _run(["kubectl", "config", "current-context"]).stdout.strip()
         if current != args.kube_context:
             raise RuntimeError(f"current kube context {current!r} differs from requested {args.kube_context!r}")
-        for node, _ in candidates:
+        for node, job_name in candidates:
             data = json.loads(_run(_kubectl(args.kube_context, "get", "node", node, "-o", "json")).stdout)
             ready = any(item.get("type") == "Ready" and item.get("status") == "True" for item in data.get("status", {}).get("conditions", []))
-            if not ready or int(data.get("status", {}).get("allocatable", {}).get("nvidia.com/gpu.shared", "0")) < 1:
+            job = next(job for job in jobs if job["metadata"]["name"] == job_name)
+            resources = job["spec"]["template"]["spec"]["containers"][0].get("resources", {})
+            gpu = {key: value for key, value in resources.get("requests", {}).items()
+                   if key in {"nvidia.com/gpu", "nvidia.com/gpu.shared"}}
+            if len(gpu) != 1 or any(resources.get("limits", {}).get(key) != value for key, value in gpu.items()):
+                raise ValueError("validation Job must request and limit one consistent GPU resource")
+            key, quantity = next(iter(gpu.items()))
+            if int(quantity) < 1:
+                raise ValueError("validation GPU quantity must be positive")
+            if not ready or int(data.get("status", {}).get("allocatable", {}).get(key, "0")) < int(quantity):
                 raise RuntimeError(f"{node}: not Ready or no shared GPU is allocatable")
         _run(_kubectl(args.kube_context, "-n", namespace, "apply", "--dry-run=server", "-f", str(args.jobs)))
         existing = json.loads(_run(_kubectl(args.kube_context, "-n", namespace, "get", "jobs", "-o", "json")).stdout)

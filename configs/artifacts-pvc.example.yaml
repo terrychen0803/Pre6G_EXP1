@@ -1,0 +1,14 @@
+# Provision only on a new site after reviewing the installed CSI StorageClass.
+# Do not apply over an existing research PVC or delete it to change settings.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pre6g-artifacts
+  namespace: experiments
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ceph-filesystem
+  resources:
+    requests:
+      storage: 50Gi

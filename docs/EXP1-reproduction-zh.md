@@ -1,7 +1,6 @@
 # EXP1 重現手冊：現有 K8s → dry-run → master 預測 → ground truth
 
-本版以**三台機器已部署 K8s/k3s**為起點。master IP 已改變；先查驗現況，不能直接沿用舊叢集證據中的 IP、Pod IP、GPU UUID 或 kube context。以下指令在可存取叢集的 master/control 端、專案根目錄執行。`generated/` 保存每次實驗輸出，不提交含站點資料或原始 PDU Excel 的檔案。
-
+目前 RKE2/HAMi/Nsight 2026.5.1 的環境、配置與 Preflight/Profiling 操作以 [Environment Setup](environment-setup.md)、[Configuration](configuration.md)、[Data Collection Guide](data-collection-guide.md) 為準。本文保留完整 Ground Truth、PDU 匯入和重複實驗流程；本次沒有執行實機 GPU Job，4090 同 Trace 特徵一致性仍待驗證。以下指令於 Master/control 端的 Repository 根目錄執行。
 ## 0. 凍結本次環境與程式版本
 
 ```bash
@@ -17,27 +16,15 @@ kubectl config current-context
 kubectl get nodes -o wide
 ```
 
-把版本與站點資料記在該次 run 的私有記錄中：`git rev-parse HEAD`、`python --version`、`kubectl version`、`helm version`、三台 `hostname`／`/etc/os-release`／NVIDIA driver 與 GPU UUID、master 新 IP、PDU outlet 對應、映像 digest、資料集識別、Nsight 版本。`cluster/site.example.env` 是記錄欄位範本，複製後填寫；**不提交**帶有站點資訊或 k3s token 的檔案。執行前先確定本地提交已推送，因為 worker Job 會從這個 repo clone 並 checkout `--worker-commit`。
+把版本與站點資料記在該次 run 的私有記錄中：`git rev-parse HEAD`、`python --version`、`kubectl version`、`helm version`、三台 `hostname`／`/etc/os-release`／NVIDIA driver 與 GPU UUID、master 新 IP、PDU outlet 對應、映像 digest、資料集識別、Nsight 版本。`configs/site.local.yaml` 依配置說明填寫；**不提交**帶有站點資訊或叢集 Token 的檔案。執行前先確定本地提交已推送，因為 worker Job 會從這個 repo clone 並 checkout `--worker-commit`。
 
-## 1. 核對現有叢集，不重新安裝
+## 1. 核對現有叢集
 
-```bash
-kubectl get nodes -o wide
-kubectl get runtimeclass nvidia
-kubectl -n experiments get pvc pre6g-artifacts -o wide
-kubectl get pv pre6g-artifacts-nfs -o yaml
-kubectl -n netdata get pods,svc -o wide
-kubectl -n gpu-monitoring get pods,ds -o wide
-kubectl get pods -A -o wide
-```
-
-兩個 GPU node 必須 `Ready`、無 `DiskPressure`，且 `allocatable.nvidia.com/gpu.shared >= 1`；collector/master node 也必須 `Ready`，能排 Pod 並讀同一個 RWX PVC。`kubectl get node <name> -o json` 的 hostname 要與 `examples/yolo26/formal-cross-node-dryrun.yaml`、四份 `k8s/formal/` Job 的 nodeSelector 一致。若重灌後名稱改了，先同步更新 YAML、power manifest 的 `node_binding`，並以 `nvidia-smi --query-gpu=uuid --format=csv,noheader` 核對實際 GPU UUID；不能只改名稱而沿用舊節點的 power 模型品質主張。
-
-master IP 改變後，檢查 kubeconfig 的 server 位址、NFS PV `spec.nfs.server`、NFS export／防火牆，以及各 node 的 Netdata Parent 連線。**DCGM 的 Pod IP 不寫回 YAML**：cross-node preflight 會依 node 尋找 Ready exporter，執行前即時解析。若上述資源缺失，停止進入 dry-run；`cluster/` 有 GPU sharing 與 NFS 的參考範本，重新部署時再用。套件安裝請遵循 [K3s 官方文件](https://docs.k3s.io/quick-start)、[NVIDIA device plugin](https://github.com/NVIDIA/k8s-device-plugin#shared-access-to-gpus)、[Netdata Kubernetes](https://learn.netdata.cloud/docs/netdata-agent/installation/kubernetes) 與 [DCGM Exporter](https://docs.nvidia.com/datacenter/dcgm/latest/gpu-telemetry/dcgm-exporter.html)，並凍結當次實際版本；本次已安裝的叢集不需重做安裝。
-
-各 GPU node 核對 `nvidia-smi`、`/opt/nvidia/nsight-systems-cli/2026.4.1/bin/nsys --version`；Job 需要完整 Nsight installation root 可在 `/opt/pre6g/nsight` 掛載。核對 Netdata Parent 對兩個 hostname 的歷史查詢、DCGM 四項 GPU 指標與約 1 秒 cadence，以及 master/worker 時鐘同步。詳細欄位和閾值見 [監測 preflight](monitoring-preflight.md)。若任何模型要求的 telemetry 欄位缺失，停止 power ranking。
+依 [Environment Setup](environment-setup.md) 核對 RKE2、HAMi `nvidia.com/gpu`、Nsight 2026.5.1 `target-linux-x64/nsys`、Netdata/DCGM 1 Hz、CephFS RWX 與 Collector tolerations。複製 `configs/rke2.example.yaml` 為 `configs/site.local.yaml` 並填妥真實 identity。不要修改 Frozen Power manifest 的歷史 Node Binding；同機同卡更名使用明確 deployment alias，詳見配置說明。`cluster/` 舊 device-plugin/NFS 範本不可直接套用到現有 HAMi。
 
 ## 2. 凍結同一份 workload 與 master 模型
+
+以下 node override/PDU 範例使用研究室具名節點；若採通用配置，請全部替換為 `candidates[].node`。Override 非必要，亦可直接用 config 中模型。
 
 正式 40 分鐘來源檔為 `examples/yolo26/formal-40min-source-job.yaml`，固定 1639 epochs、512 張合成 train 圖、batch 16、52,448 training iterations；兩份 `formal-40min-dryrun-120s.yaml` 用**同一完整 workload**，Nsight 只擷取前 120 秒。來源、兩份模板的 `model`、`batch`、`epochs`、`imgsz`、`amp`、`val`、`save`、`patience` 必須一致。此 repo 原有的 960-unit 比較屬另一個短 fixture，不能拿來驗證這份 52,448-unit Job。
 
@@ -48,12 +35,12 @@ export CTX="$(kubectl config current-context)"
 export COMMIT="$(git rev-parse HEAD)"
 export RUN=exp1-b16-r01
 CROSS_ARGS=(
-  --mode cross-node --cross-node-config examples/yolo26/formal-cross-node-dryrun.yaml
+  --mode cross-node --cross-node-config configs/site.local.yaml
   --run-id "$RUN" --worker-commit "$COMMIT" --output-dir "generated/$RUN"
-  --candidate-runtime-model iccl-s3-251230=models/runtime/RTX4090_yolo_soft_gate_v1.json
-  --candidate-runtime-model mirc516-20250605=models/runtime/RTX5090_yolo_trace_only_v1.json
-  --candidate-power-bundle iccl-s3-251230=models/power/bundles/pdu1-outlet1-20260416-20260612
-  --candidate-power-bundle mirc516-20250605=models/power/bundles/pdu1-outlet7-20260416-20260612
+  --candidate-runtime-model worker-4090=models/runtime/RTX4090_yolo_soft_gate_v1.json
+  --candidate-runtime-model worker-5090=models/runtime/RTX5090_yolo_trace_only_v1.json
+  --candidate-power-bundle worker-4090=models/power/bundles/pdu1-outlet1-20260416-20260612
+  --candidate-power-bundle worker-5090=models/power/bundles/pdu1-outlet7-20260416-20260612
 )
 python scripts/run_experiment_pipeline.py "${CROSS_ARGS[@]}"
 ```
@@ -70,7 +57,7 @@ python scripts/run_experiment_pipeline.py "${CROSS_ARGS[@]}" --smoke-only --kube
 python scripts/run_experiment_pipeline.py "${CROSS_ARGS[@]}" --execute --kube-context "$CTX"
 ```
 
-Preflight 做依賴、context、node、PVC、模型載入、DCGM endpoint 和 Kubernetes server-side dry-run 檢查；smoke 建立短暫工具 Pod 核對 GPU UUID、Nsight、NFS、Netdata/DCGM 連線。`--execute` 才同時建立 RTX4090／RTX5090 的 120 秒 Profile Jobs；完成後 master 收回 PVC 產物並輸出 `ranking-input.json` 與 `provisional-ranking.json`。必須檢查 `cross-node-run-summary.json.status=completed`、兩個候選都有 artifacts、時間對齊 gate 通過，且 `ranking-input.total_work_units=52448`。失敗時保留 Pod/log/trace，改用新 run ID，不把半套結果送入驗證。
+Preflight 做依賴、context、node、PVC、模型載入、DCGM endpoint 和 Kubernetes server-side dry-run 檢查；smoke 會要求 GPU resource 並建立短暫工具 Pod（不執行 YOLO 或 CUDA trace） 核對 GPU UUID、Nsight、RWX PVC、Netdata/DCGM 連線。`--execute` 才同時建立 RTX4090／RTX5090 的 120 秒 Profile Jobs；完成後 master 收回 PVC 產物並輸出 `ranking-input.json` 與 `provisional-ranking.json`。必須檢查 `cross-node-run-summary.json.status=completed`、兩個候選都有 artifacts、時間對齊 gate 通過，且 `ranking-input.total_work_units=52448`。失敗時保留 Pod/log/trace，改用新 run ID，不把半套結果送入驗證。
 
 ## 4. 產生未開 profiler 的完整 ground-truth Jobs
 
@@ -122,8 +109,8 @@ python scripts/normalize_pdu_excel.py --input pdu-original.xlsx \
 python scripts/run_experiment_pipeline.py --mode validation-evaluate \
   --validation-plan "generated/$VALIDATION/validation-plan.json" \
   --pods-json "generated/$VALIDATION/execution/validation-pods.json" \
-  --pdu "iccl-s3-251230=generated/$VALIDATION/pdu-4090.csv" \
-  --pdu "mirc516-20250605=generated/$VALIDATION/pdu-5090.csv" \
+  --pdu "worker-4090=generated/$VALIDATION/pdu-4090.csv" \
+  --pdu "worker-5090=generated/$VALIDATION/pdu-5090.csv" \
   --pdu-mode point-sample --pdu-max-gap-seconds ACTUAL_MAX_ALLOWED_GAP \
   --output-dir "generated/$VALIDATION/evaluation"
 ```
@@ -146,6 +133,6 @@ python scripts/summarize_validation_series.py \
 
 ## 離線版尚需現場補齊
 
-1. master 新 IP、目前 kube context、三台實際 hostname/GPU UUID 與 NFS/Netdata URL 的現況核對。
+1. 每次 run 的 kube context、真實 GPU UUID、Netdata host route、版本/digest 與 CephFS/CSI 狀態核對。
 2. 真實 PDU Excel 範例與欄位／取樣語意，才能把上面的欄名與 gap 閾值改成已驗證的值。
 3. 一次 clean-cluster preflight、兩節點 dry-run、每節點完整 Job 與 PDU 覆蓋實測。離線測試無法替代這些證據。

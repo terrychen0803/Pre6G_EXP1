@@ -10,7 +10,8 @@ metadata:
     pre6g.io/test-purpose: dryrun-full-workload-prediction
     pre6g.io/production-result: "false"
     pre6g.io/full-workload-fixed: "true"
-    pre6g.io/sizing-reference-node: iccl-s3-251230
+    pre6g.io/sizing-reference-node: historical-4090-reference
+    pre6g.io/sizing-reference-provenance-commit: ab2a20c7ded276a179d48f48a1efcc5afdb4afad
     pre6g.io/sizing-reference-device: RTX4090
     pre6g.io/sizing-target-minutes: "40"
     pre6g.io/sizing-reference-ms-per-iteration: "45.77585973120491"
@@ -89,11 +90,11 @@ spec:
             requests:
               cpu: "4"
               memory: 8Gi
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
             limits:
               cpu: "8"
               memory: 16Gi
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
           volumeMounts:
             - name: work
               mountPath: /work
