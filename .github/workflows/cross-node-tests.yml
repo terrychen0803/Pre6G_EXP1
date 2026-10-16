@@ -40,6 +40,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Legacy compatibility tests inspect the frozen baseline commit.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'

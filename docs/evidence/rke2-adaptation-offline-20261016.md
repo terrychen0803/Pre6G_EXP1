@@ -71,3 +71,7 @@ Schema cache SHA-256（本次實際檢查）：
 ## 公開資訊處理
 
 依使用者要求，公開設定、模板、文件及測試中的站點 hostname/UUID/Netdata route 已匿名化；IP mocks 使用 IANA documentation address。測試只在 temporary config 中讀取原有 Frozen Power manifest 的 binding。未修改任何 Frozen Artifact 或原始歷史 Binding，也未改寫 Git 歷史；原有模型檔及既有歷史內容仍存在於 main。正式執行須私下配置 verified identity。
+
+## GitHub CI history requirement
+
+PR 第一輪 CI 的 checkout 預設 depth=1，無法讀取 `ab2a20c7` 的舊 v1 模板，故 legacy compatibility test 失敗。Workflow 已設 `fetch-depth: 0`，保留完整歷史供 frozen baseline regression 使用；本地完整 Repository 的 103 項測試通過。這是 Git fixture 可取得性問題，不是模型推論變更。
