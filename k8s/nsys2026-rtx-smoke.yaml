@@ -15,7 +15,7 @@ spec:
       runtimeClassName: nvidia
       restartPolicy: Never
       nodeSelector:
-        kubernetes.io/hostname: iccl-s3-251230
+        kubernetes.io/hostname: worker-4090
       containers:
         - name: profiler
           image: nvidia/cuda:12.8.1-devel-ubuntu22.04
@@ -25,7 +25,7 @@ spec:
             - -lc
             - |
               set -euxo pipefail
-              NSYS=/opt/pre6g/nsight/bin/nsys
+              NSYS=/opt/pre6g/nsight/target-linux-x64/nsys
               OUT=/artifacts/profile
 
               echo "===== HOSTNAME ====="
@@ -116,9 +116,9 @@ spec:
               echo "===== NSYS2026_SMOKE_PASS ====="
           resources:
             requests:
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
             limits:
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
           volumeMounts:
             - name: nsys-runtime
               mountPath: /opt/pre6g/nsight
@@ -128,7 +128,7 @@ spec:
       volumes:
         - name: nsys-runtime
           hostPath:
-            path: /opt/nvidia/nsight-systems-cli/2026.4.1
+            path: /opt/nvidia/nsight-systems-cli/2026.5.1
             type: Directory
         - name: artifacts
           emptyDir: {}
@@ -150,7 +150,7 @@ spec:
       runtimeClassName: nvidia
       restartPolicy: Never
       nodeSelector:
-        kubernetes.io/hostname: mirc516-20250605
+        kubernetes.io/hostname: worker-5090
       containers:
         - name: profiler
           image: nvidia/cuda:12.8.1-devel-ubuntu22.04
@@ -160,7 +160,7 @@ spec:
             - -lc
             - |
               set -euxo pipefail
-              NSYS=/opt/pre6g/nsight/bin/nsys
+              NSYS=/opt/pre6g/nsight/target-linux-x64/nsys
               OUT=/artifacts/profile
 
               echo "===== HOSTNAME ====="
@@ -251,9 +251,9 @@ spec:
               echo "===== NSYS2026_SMOKE_PASS ====="
           resources:
             requests:
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
             limits:
-              nvidia.com/gpu.shared: "1"
+              nvidia.com/gpu: "1"
           volumeMounts:
             - name: nsys-runtime
               mountPath: /opt/pre6g/nsight
@@ -263,7 +263,7 @@ spec:
       volumes:
         - name: nsys-runtime
           hostPath:
-            path: /opt/nvidia/nsight-systems-cli/2026.4.1
+            path: /opt/nvidia/nsight-systems-cli/2026.5.1
             type: Directory
         - name: artifacts
           emptyDir: {}

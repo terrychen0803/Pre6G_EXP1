@@ -46,7 +46,10 @@
       "exclusiveMinimum": 0
     },
     "predicted_total_job_runtime_s": {
-      "type": ["number", "null"],
+      "type": [
+        "number",
+        "null"
+      ],
       "exclusiveMinimum": 0
     },
     "total_job_runtime_status": {
@@ -54,6 +57,11 @@
     },
     "aggregation_scope": {
       "const": "steady-work-only"
+    },
+    "inferred_high_load_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
     }
   },
   "additionalProperties": true

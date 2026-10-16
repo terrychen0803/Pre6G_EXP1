@@ -23,6 +23,12 @@ on:
       - 'models/**'
       - 'src/**'
       - 'pyproject.toml'
+      - 'configs/**'
+      - 'tests/**'
+      - 'schemas/**'
+      - 'scripts/**'
+      - 'requirements*.txt'
+      - 'k8s/nsys2026-rtx-smoke.yaml'
   workflow_dispatch:
 
 permissions:
@@ -34,14 +40,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Legacy compatibility tests inspect the frozen baseline commit.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: python -m pip install -r requirements-power-model.txt
-      - run: python -m pip install -r requirements-evaluation.txt
-      - run: python -m pip install -e .
-      - run: python -m unittest discover -s tests -p 'test_runtime_model.py' -v
-      - run: python -m unittest discover -s tests -p 'test_cross_node_dryrun.py' -v
-      - run: python -m unittest discover -s tests -p 'test_experiment_pipeline.py' -v
-      - run: python -m unittest discover -s tests -p 'test_validation_runs.py' -v
-      - run: python -m unittest discover -s tests -p 'test_exp1_evaluation.py' -v
+      - run: python -m pip install -r requirements-dev.txt -e .
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/check_manifests.py k8s/formal/*.yaml k8s/nsys2026-rtx-smoke.yaml examples/yolo26/*job.yaml
