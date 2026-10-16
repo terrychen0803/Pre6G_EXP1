@@ -44,6 +44,7 @@ python scripts/run_experiment_pipeline.py \
 | Preflight、Smoke、Profiling、匯出及下載資料 | [Data Collection Guide](docs/data-collection-guide.md) |
 | CSV 單位、JSON Schema、Timestamp、目錄與缺失值 | [Data Schema](docs/data-schema.md) |
 | 完整 Job、PDU 匯入、重複實驗及評估 | [EXP1 重現手冊](docs/EXP1-reproduction-zh.md)、[研究 Protocol](docs/EXP1-experiment-protocol-zh.md) |
+| 離線量測 Master 選點決策延遲（未來整合） | [量測說明](docs/decision-latency-benchmark-zh.md) |
 | 定位失敗 | [Troubleshooting](docs/troubleshooting.md) |
 | 正式收集前驗收 | [Handoff Checklist](docs/handoff-checklist.md) |
 | 本次離線檢查與未完成項目 | [適配驗證紀錄](docs/evidence/rke2-adaptation-offline-20261016.md) |
