@@ -7,6 +7,7 @@
 - **離線可檢查：**程式、固定 YOLO26 YAML、模型檔、叢集範本、執行步驟及結果摘要已收錄。
 - **尚待實機驗證：**master 新 IP、現有 K8s 的節點與 GPU/Nsight/Netdata/DCGM/NFS 狀態，以及 PDU Excel 真實欄位與取樣語意。沒有實機資料時，不能宣稱 ground truth 已完成。
 - 現有 power bundle 仍標記 `validation_required`。跨節點排名是研究用 provisional 結果；不等於正式 production 自動選點已通過品質門檻。
+- RTX3090 的凍結 runtime 模型與交叉驗證結果收錄於 [待整合模型](models/runtime/candidates/RTX3090/README.md)；目前尚未加入推論或跨節點候選。
 
 ## 從這裡開始
 
