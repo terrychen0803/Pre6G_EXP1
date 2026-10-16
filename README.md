@@ -34,6 +34,24 @@ python scripts/run_experiment_pipeline.py \
 
 預期產生 `cross-node-plan.json`、`dryrun-jobs.yaml`、`collector-pod.yaml` 和摘要；`status=planned` 才表示離線計畫成功。Worker Commit 必須已推送且含本次適配，才能進行 live preflight。完整的 Preflight → Smoke → Profiling → Prediction → Ground Truth 操作與啟動 GPU 的界線見[資料收集手冊](docs/data-collection-guide.md)。
 
+## Master 選點決策延遲量測（未來整合）
+
+[量測程式](scripts/measure_decision_latency.py)可在 master 上重播**已完成**的跨節點實驗，計算資料已收齊後，執行 workload discovery、runtime／power 模型預測到寫出節點排名的時間。先確認 `generated/<run-id>/cross-node-run-summary.json` 的 `status` 為 `completed`，且原實驗使用的 Job、模型與 power bundle 路徑仍可讀；上面的 `status=planned` 離線計畫不能用於量測。
+
+從 Repository 根目錄執行（參數示範為預設值）：
+
+```bash
+python scripts/measure_decision_latency.py \
+  --run-dir generated/<run-id> \
+  --repeats 30 \
+  --warmups 0 \
+  --threshold-ms 100
+```
+
+結果寫入 `generated/<run-id>/decision-latency-benchmark.json`；可用 `--output <path>` 改位置。查看 `statistics.mean_ms`、`p95_ms`、`max_ms`、`mean_kpi_pass` 及 `command_statistics`：預設以 30 次重播的**平均值 ≤ 100 ms** 判定。程式會核對原實驗模型雜湊及選中節點，在暫存目錄重播，不會啟動 GPU Job 或覆寫原排名。
+
+這是離線的 **master 決策處理延遲**，不含 worker profiling、Kubernetes 輪詢、collector 啟動及資料傳輸；不能直接代表「worker 完成至選點」或「任務提交至執行」的等待時間。正式流程的線上量測仍待整合，邊界與後續步驟見[量測說明](docs/decision-latency-benchmark-zh.md)。
+
 ## 文件導覽
 
 | 要做的事 | 文件 |
