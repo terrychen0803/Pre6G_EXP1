@@ -4,7 +4,7 @@ Pre6G_EXP1 是 Kubernetes GPU Profiling 與整機耗能選點的研究專案：M
 
 ## 目前狀態與研究邊界
 
-- 本次適配基於 `main` 的 `ab2a20c7ded276a179d48f48a1efcc5afdb4afad`，支援 RKE2、HAMi `nvidia.com/gpu`、Nsight 2026.5.1 與 CephFS RWX。
+- 本次適配以 `ab2a20c7ded276a179d48f48a1efcc5afdb4afad` 為模型基準，已整合 `main` 的 PR #4（RTX3090 Archived Candidate），支援 RKE2、HAMi `nvidia.com/gpu`、Nsight 2026.5.1 與 CephFS RWX。
 - 站點回報已驗證：RKE2 v1.35.6+rke2r1、Driver 595.99.02、Netdata/DCGM 1 Hz、100% 對齊覆蓋及 Master/4090/5090 PVC 讀寫。詳細版本與證據界線見[環境設定](docs/environment-setup.md)。
 - **本次僅執行離線測試，沒有執行 GPU Job。** Nsight CUDA Trace／GPU Metrics 的 RKE2 Job、4090 模型與 EXP1 同 Trace 特徵一致性、完整跨節點 Prediction／Scheduling 仍待實機驗證。Mock PASS 不代表正式 Profiling PASS。
 - RTX3090 因 Driver/NVML mismatch 排除；GPU Operator Flux HelmRelease 的 ClusterPolicy readiness 問題仍存在，不能宣稱整體 Operator 健康。Top1/Top2 GPU% 尚無已驗證 Process-level Collector；power bundles 仍為 `validation_required`。
@@ -50,7 +50,7 @@ python scripts/run_experiment_pipeline.py \
 
 `docs/evidence/` 保存歷史觀測，不代表目前叢集狀態；舊 k3s/NFS/sharing 安裝範本在 `cluster/`，不得直接套用到 RKE2/HAMi。新的共享儲存範例為 [configs/artifacts-pvc.example.yaml](configs/artifacts-pvc.example.yaml)。
 
-## Frozen Runtime Models
+## 目前正式候選：RTX4090／RTX5090 Frozen Runtime Models
 
 | Device | Artifact | Schema / Type | Detector |
 |---|---|---|---|
@@ -58,5 +58,11 @@ python scripts/run_experiment_pipeline.py \
 | RTX5090 | `models/runtime/RTX5090_yolo_trace_only_v1.json` | v1 / `ridge_log_runtime` | `yolo-v1` |
 
 模型訓練來源、Frozen Parameters、Model ID 及 SHA-256 保持原樣。`yolo-v2-long` 僅作額外診斷，不可替換 Frozen Model 輸入。4090 的 `inferred_high_load_score` 保留於 Prediction、Semantic Runtime 及排名輸入。模型 override 可重複傳入 `--candidate-runtime-model NODE=PATH`／`--candidate-power-bundle NODE=PATH`，節點必須存在於 config；每次更換用新的 run ID，模型 Hash 寫入計畫並於推論前重查。測試參考向量不構成同 Trace 特徵一致性證據。
+
+## RTX3090 Archived Candidate：尚未整合
+
+PR #4 新增的 [RTX3090 Frozen Model 與研究資料](models/runtime/candidates/RTX3090/README.md) 原樣保留，包括 `frozen_model.json`、`crossfit_metrics.csv`、`crossfit_predictions.csv` 與原始說明；係數、模型資料及檔案 SHA-256 均未修改。
+
+RTX3090 **不在目前正式候選清單**，尚未接入 EXP1 推論或跨節點配置。封存 JSON 沒有 `schema_version`，不可直接傳入 `scripts/predict_runtime.py`，也不會因整合 main 而自動轉為 v2。未來仍需 metadata contract、同 Trace 特徵一致性、RTX3090 實測、Node/GPU binding、profile Job 與 Power bundle 等獨立整合；目前 Driver/NVML mismatch 限制也未處理。封存的 crossfit 評估不是正式部署結果。
 
 公開範例已移除站點 hostname、GPU UUID 與內部 Netdata route。Frozen Models 及其原始歷史 Binding 依研究保護規則保持 byte-for-byte 不變；本次沒有清除 Git 既有歷史，私有站點設定不納入 PR。
