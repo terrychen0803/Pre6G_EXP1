@@ -12,7 +12,7 @@
 | Model/Feature device 或 detector mismatch | 4090 使用 soft-gate v2、5090 使用 ridge v1，均 yolo-v1；v2-long 只作診斷；不要改 features 迎合模型 |
 | Frozen artifact changed | 先比較 plan Hash、`git diff -- models/`、備份 Hash；恢復已核准的 Artifact 來源，使用新 run，不改 checksum 掩蓋變更 |
 | Collector Pending / blocking taints | `kubectl describe node MASTER`、`kubectl -n experiments describe pod COLLECTOR`；檢查 Ready、DiskPressure、unschedulable、PVC 與明確 tolerations；不要移除 Node taint |
-| GPU Job Pending | 檢查 RuntimeClass、HAMi 註冊 resource、requests=limits、Allocatable、scheduler event；20 是虛擬份額，非實體卡數。不同 scheduler/份額策略需現場驗證 |
+| GPU Job Pending | 先從失敗 Smoke 留下的 `logs/<pod>.status.json` 查 `spec.schedulerName`，再看 `.events.json`、`.describe.txt` 和 `.log`。HAMi v2.9.0 實測特權容器會略過 webhook mutation，落到 `default-scheduler`；本版模板使用非特權容器，預期為 `hami-scheduler`。若已是 HAMi 仍 Pending，檢查目前配額、其他人的工作負載、Node selector、RuntimeClass、GPU resource、requests=limits 與 Allocatable；20 是虛擬份額，非實體卡數。不要停止其他人的 Job。 |
 | Exporter 找不到／不唯一／not Ready | 核對 namespace/selector、spec.nodeName、Pod rollout/deletionTimestamp；不要寫死 Pod IP；Pod 重建後重新 Preflight |
 | Pod proxy Forbidden | 操作者需 exporter namespace 的 list Pods/get pods/proxy；請管理員最小授權，既有 namespace-rbac 不是完整操作者權限 |
 | DCGM UUID metric 缺失 | 在選中 Node 的 exporter 核對四項 metrics 的 UUID label、實體卡可見性和 DCGM/NVML；不讀另一個 node 的 Service 流量替代 |
