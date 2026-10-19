@@ -39,7 +39,7 @@ python scripts/run_experiment_pipeline.py \
   --output-dir generated/yolo26-dryrun-001
 ```
 
-請先檢查 `cross-node-plan.json`、`dryrun-jobs.yaml`、`collector-pod.yaml`：特別是 kube context、namespace、PVC、候選節點 hostname、`collector_node`、GPU UUID、Netdata URL、影像、Nsight mount、權限，以及目前節點是否可承擔同時 profiling。Master/collector node 必須 Ready、無 DiskPressure、能掛載 `pre6g-artifacts` 的 RWX NFS，且目前 collector manifest 沒有 tolerations，因此 master 若有 `NoSchedule`／`NoExecute` taint，preflight 會直接失敗並要求先明確處理叢集排程政策。計畫檔中的 `DCGM_ENDPOINT_UNRESOLVED` 是刻意保留的安全標記，**不可直接提交 `dryrun-jobs.yaml`**；正式執行時才會依 `dcgm_exporter` 設定尋找每個節點上 Running/Ready 的 exporter Pod，將當時的 Pod IP 寫入 `dryrun-jobs-resolved.yaml`，並以此檔做 server-side dry-run 與提交。示範 Profile Job 會以 `privileged: true` 存取 Nsight；叢集政策不允許時，需先調整經驗證的模板。執行前也需確認本機 power ONNX dependencies 已安裝，並留意模型目前仍為 research provisional。
+請先檢查 `cross-node-plan.json`、`dryrun-jobs.yaml`、`collector-pod.yaml`：特別是 kube context、namespace、PVC、候選節點 hostname、`collector_node`、GPU UUID、Netdata URL、影像、Nsight mount、權限，以及目前節點是否可承擔同時 profiling。Master/collector node 必須 Ready、無 DiskPressure、能掛載 `pre6g-artifacts` 的 RWX NFS，且目前 collector manifest 沒有 tolerations，因此 master 若有 `NoSchedule`／`NoExecute` taint，preflight 會直接失敗並要求先明確處理叢集排程政策。計畫檔中的 `DCGM_ENDPOINT_UNRESOLVED` 是刻意保留的安全標記，**不可直接提交 `dryrun-jobs.yaml`**；正式執行時才會依 `dcgm_exporter` 設定尋找每個節點上 Running/Ready 的 exporter Pod，將當時的 Pod IP 寫入 `dryrun-jobs-resolved.yaml`，並以此檔做 server-side dry-run 與提交。HAMi v2.9.0 現場驗證顯示 `privileged: true` 會略過 webhook 的 GPU scheduler mutation，因此 Profile Job 與 Smoke Pod 均使用非特權容器；產生計畫時會拒絕特權 Profile Job。Nsight 2026.5.1 的 CUDA Trace/SQLite CUPTI kernel 已在 RTX4090 非特權 Pod 驗證，正式整套 YOLO Profiling 尚未執行。執行前也需確認本機 power ONNX dependencies 已安裝，並留意模型目前仍為 research provisional。
 
 第二階段可先在**同一輸出目錄**執行唯讀叢集檢查。Preflight 現在會在建立任何 GPU Job 前先驗證 control-side `numpy`／`onnxruntime`、`CPUExecutionProvider`、每個 power bundle 的 `scaler.json`，並實際用 ONNX Runtime 載入 `model.onnx`；缺少 `requirements-power-model.txt` 依賴時會直接失敗，不再等 120 秒 profiling 完成後才發現。之後才會解析 DCGM Pod IP，產出 `dryrun-jobs-resolved.yaml` 與 `dcgm-endpoints.json`，並做 Kubernetes server-side dry-run，**不建立任何叢集資源**：
 
@@ -67,7 +67,7 @@ python scripts/run_experiment_pipeline.py \
   --kube-context YOUR_K3S_CONTEXT
 ```
 
-程式會保存 `smoke-pods.yaml`、各 Pod 的 log，成功時另存 `smoke-result.json`，並在成功或失敗時嘗試刪除**僅本次建立**的檢查 Pod；若刪除失敗，整體 smoke test 會報錯。成功後 NFS 上會保留兩個小型 `smoke/<run-id>/<node>/marker.json` 供稽核，請再從 master 的 `/srv/pre6g-artifacts/smoke/<run-id>/` 做唯讀回查。這個測試只證明連線、掛載與基本工具可用，**不等於**完整 Nsight trace、長時間訓練或模型品質驗證。
+程式會保存 `smoke-pods.yaml`、各 Pod 的 log，成功時另存 `smoke-result.json`。失敗時會在刪除前另存 `logs/<pod>.status.json`、`logs/<pod>.events.json`、`logs/<pod>.describe.txt`，以便檢查實際 `schedulerName`、HAMi 配額及排程事件。成功或失敗時只嘗試刪除**本次建立**的檢查 Pod；若刪除失敗，整體 smoke test 會報錯。成功後 NFS 上會保留兩個小型 `smoke/<run-id>/<node>/marker.json` 供稽核，請再從 master 的 `/srv/pre6g-artifacts/smoke/<run-id>/` 做唯讀回查。這個測試只證明連線、掛載與基本工具可用，**不等於**完整 Nsight trace、長時間訓練或模型品質驗證。
 
 等 smoke test 與 master 回查通過後，才在**新 run ID／輸出目錄**以 `--execute` 提交兩個 dry-run Jobs；程式會**重新**解析 DCGM Pod IP 與重做 preflight，避免使用先前快照：
 

@@ -6,7 +6,7 @@ Pre6G_EXP1 是 Kubernetes GPU Profiling 與整機耗能選點的研究專案：M
 
 - 本次適配以 `ab2a20c7ded276a179d48f48a1efcc5afdb4afad` 為模型基準，已整合 `main` 的 PR #4（RTX3090 Archived Candidate），支援 RKE2、HAMi `nvidia.com/gpu`、Nsight 2026.5.1 與 CephFS RWX。
 - 站點回報已驗證：RKE2 v1.35.6+rke2r1、Driver 595.99.02、Netdata/DCGM 1 Hz、100% 對齊覆蓋及 Master/4090/5090 PVC 讀寫。詳細版本與證據界線見[環境設定](docs/environment-setup.md)。
-- **本次僅執行離線測試，沒有執行 GPU Job。** Nsight CUDA Trace／GPU Metrics 的 RKE2 Job、4090 模型與 EXP1 同 Trace 特徵一致性、完整跨節點 Prediction／Scheduling 仍待實機驗證。Mock PASS 不代表正式 Profiling PASS。
+- RTX4090 非特權 Pod 已驗證 Nsight 2026.5.1 CUDA Trace 與 SQLite CUPTI kernel；CephFS 單節點讀寫及兩個 Host 的 Netdata 查詢也已通過。RTX5090 的雙節點工具 Smoke 受現有工作負載與 HAMi 配額限制，尚未完成。正式整套 YOLO Profiling、4090 模型與 EXP1 同 Trace 特徵一致性、完整跨節點 Prediction／Scheduling 仍待實機驗證；不可將部分 Smoke 視為全部通過。
 - RTX3090 因 Driver/NVML mismatch 排除；GPU Operator Flux HelmRelease 的 ClusterPolicy readiness 問題仍存在，不能宣稱整體 Operator 健康。Top1/Top2 GPU% 尚無已驗證 Process-level Collector；power bundles 仍為 `validation_required`。
 
 ## Quick Start：先離線產生計畫

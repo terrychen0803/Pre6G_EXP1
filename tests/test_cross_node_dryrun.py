@@ -186,6 +186,35 @@ class CrossNodeDryrunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "run_id"):
             DRYRUN.prepare(CONFIG, run_id="../unsafe", worker_commit=COMMIT)
 
+    def test_netdata_placeholders_are_rejected_before_a_plan_is_written(self):
+        for url in ("http://NETDATA_PARENT:19999/host/worker-4090",
+                    "http://netdata.example:19999/host/NETDATA_HOST_4090"):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as raw:
+                config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+                config["candidates"][0]["netdata_url"] = url
+                path = Path(raw) / "config.yaml"
+                path.write_text(yaml.safe_dump(config), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "placeholder"):
+                    DRYRUN.prepare(path, run_id="test-run-001", worker_commit=COMMIT)
+
+    def test_formal_templates_do_not_request_privileged_gpu(self):
+        for path in (ROOT / "k8s" / "formal").glob("*.yaml"):
+            with self.subTest(path=path.name):
+                job = yaml.safe_load(path.read_text(encoding="utf-8"))
+                container = job["spec"]["template"]["spec"]["containers"][0]
+                self.assertNotEqual(container.get("securityContext", {}).get("privileged"), True)
+        config = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as raw:
+            profile = yaml.safe_load((ROOT / config["candidates"][0]["profile_job_template"]).read_text(encoding="utf-8"))
+            profile["spec"]["template"]["spec"]["containers"][0]["securityContext"] = {"privileged": True}
+            path = Path(raw) / "privileged.yaml"
+            path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+            config["candidates"][0]["profile_job_template"] = str(path)
+            config_path = Path(raw) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "bypasses HAMi"):
+                DRYRUN.prepare(config_path, run_id="test-run-001", worker_commit=COMMIT)
+
     def test_cluster_preflight_needs_kubectl_and_never_submits_without_it(self):
         plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
         with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN.shutil, "which", return_value=None), patch.object(DRYRUN.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
@@ -251,6 +280,7 @@ class CrossNodeDryrunTests(unittest.TestCase):
             self.assertEqual(spec["containers"][0]["resources"]["requests"]["nvidia.com/gpu"], "1")
             self.assertIn("nvidia-smi", spec["containers"][0]["command"][2])
             self.assertNotIn("yolo detect train", spec["containers"][0]["command"][2])
+            self.assertNotIn("securityContext", spec["containers"][0])
             self.assertEqual({volume["name"] for volume in spec["volumes"]}, {"artifacts", "nsys"})
         self.assertEqual({pod["spec"]["nodeSelector"]["kubernetes.io/hostname"] for pod in pods}, {item["node"] for item in plan["candidates"]})
 
@@ -283,6 +313,46 @@ class CrossNodeDryrunTests(unittest.TestCase):
             self.assertTrue(result["passed"])
             self.assertEqual(len(result["results"]), 2)
             self.assertEqual(sum("delete" in call.args[0] for call in invoke.call_args_list), 2)
+
+    def test_failed_smoke_saves_status_events_and_logs_before_cleanup(self):
+        plan, jobs, _ = DRYRUN.prepare(CONFIG, run_id="test-run-001", worker_commit=COMMIT)
+        for job in jobs:
+            env = {item["name"]: item for item in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+            env["DCGM_URL"]["value"] = "http://192.0.2.1:9400"
+        pods = DRYRUN._smoke_pods(plan, jobs)
+        queries = 0
+        deleted = []
+
+        def fake_kubectl(command, **_kwargs):
+            nonlocal queries
+            if "get" in command and "pods" in command:
+                queries += 1
+                if queries == 1:
+                    return json.dumps({"items": []})
+                return json.dumps({"items": [{"metadata": {"name": pod["metadata"]["name"]},
+                    "status": {"phase": "Failed" if index == 0 else "Pending"}} for index, pod in enumerate(pods)]})
+            if "delete" in command:
+                deleted.append(command[command.index("pod") + 1])
+            return ""
+
+        def fake_capture(command, **_kwargs):
+            if "logs" in command:
+                return SimpleNamespace(stdout="GPU unavailable\n", stderr="", returncode=0)
+            if "get" in command and "pod" in command:
+                return SimpleNamespace(stdout=json.dumps({"spec": {"schedulerName": "default-scheduler"}}), stderr="", returncode=0)
+            if "events" in command:
+                return SimpleNamespace(stdout=json.dumps({"items": [{"reason": "FailedScheduling"}]}), stderr="", returncode=0)
+            return SimpleNamespace(stdout="Warning FailedScheduling\n", stderr="", returncode=0)
+
+        with tempfile.TemporaryDirectory() as raw, patch.object(DRYRUN, "_invoke", side_effect=fake_kubectl), patch.object(DRYRUN.subprocess, "run", side_effect=fake_capture):
+            output = Path(raw)
+            with self.assertRaisesRegex(RuntimeError, "schedulerName=default-scheduler"):
+                DRYRUN._run_smoke(plan, jobs, "test-context", output)
+            for pod in pods:
+                name = pod["metadata"]["name"]
+                for suffix in ("log", "status.json", "events.json", "describe.txt"):
+                    self.assertTrue((output / "logs" / f"{name}.{suffix}").is_file())
+                self.assertIn(name, deleted)
 
     def test_target_wrapper_records_process_window(self):
         with tempfile.TemporaryDirectory() as raw:

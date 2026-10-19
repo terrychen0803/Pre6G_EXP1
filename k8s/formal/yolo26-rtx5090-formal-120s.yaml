@@ -32,9 +32,6 @@ spec:
           image: ultralytics/ultralytics:8.4.104
           imagePullPolicy: IfNotPresent
 
-          securityContext:
-            privileged: true
-
           env:
             - name: TASK_ID
               value: yolo26-formal-5090-120s-002

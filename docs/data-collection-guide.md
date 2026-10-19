@@ -1,6 +1,6 @@
 # 資料收集：從離線計畫到正式驗證
 
-所有指令在 Repository 根目錄、已啟用 venv 的 Master/control 端執行。此文件說明可操作流程；本次適配沒有執行下列 live Smoke、Profiling 或完整訓練。完整 PDU 評估與重複實驗接續 [EXP1 重現手冊](EXP1-reproduction-zh.md) 第 4 節起。
+所有指令在 Repository 根目錄、已啟用 venv 的 Master/control 端執行。此文件說明可操作流程。目前 RTX4090 非特權 Pod 的 Nsight 2026.5.1 CUDA Trace 與 SQLite CUPTI kernel、CephFS 單節點讀寫及兩個 Host 的 Netdata 查詢已有現場驗證；RTX5090 雙節點工具 Smoke 因其他工作負載與 HAMi 配額尚未完成，正式整套 YOLO Profiling 和完整訓練也尚未執行。完整 PDU 評估與重複實驗接續 [EXP1 重現手冊](EXP1-reproduction-zh.md) 第 4 節起。
 
 ## 1. 收集前檢查與凍結
 
@@ -39,7 +39,7 @@ python scripts/run_experiment_pipeline.py "${CROSS_ARGS[@]}" \
   --smoke-only --kube-context "$CTX"
 ```
 
-核對 `nvidia-smi` 可見 UUID、Nsight `--version`、GitHub 存取、Netdata/DCGM HTTP、兩 Worker 共享 PVC 互讀。成功後工具 Pods 會刪除，logs 與 `smoke-result.json` 留在 Master；PVC marker 保留。`nfs_peer_read` 是為舊結果相容保留的欄名，現在表示 RWX backend 的 peer-read，CephFS 同樣適用。這個工具 Smoke **沒有執行 Nsight CUDA Trace**。
+核對 `nvidia-smi` 可見 UUID、Nsight `--version`、GitHub 存取、Netdata/DCGM HTTP、兩 Worker 共享 PVC 互讀。成功後工具 Pods 會刪除，logs 與 `smoke-result.json` 留在 Master；失敗時刪除前會保存各 Pod 的 status JSON、Events JSON、describe 與 logs，以檢查 HAMi webhook 實際 `schedulerName` 和排程事件；PVC marker 保留。`nfs_peer_read` 是為舊結果相容保留的欄名，現在表示 RWX backend 的 peer-read，CephFS 同樣適用。這個工具 Smoke **沒有執行 Nsight CUDA Trace**。
 
 `k8s/nsys2026-rtx-smoke.yaml` 是另行審閱後執行的 CUDA/Nsight 診斷 Job：已更新 HAMi resource、Node 及 2026.5.1 CLI，會編譯及執行 CUDA vector-add。它用 `emptyDir`，Report/SQLite 必須在 Pod 刪除前 `kubectl cp` 保存；Node 是匿名代稱；Namespace/Path 是部署範例，其他站點先複製調整。此 Job 會佔用 GPU，**本次未執行**。`--sample=none --cpuctxsw=none` 不代表 GPU Metrics 已收集，後者另需實測。
 

@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -173,6 +174,22 @@ def _env(container: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not required.issubset(values):
         raise ValueError(f"profile template is missing env vars: {sorted(required - set(values))}")
     return values
+
+
+def _validate_netdata_url(node: str, url: str) -> None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{node}: invalid Netdata URL") from exc
+    if (parsed.scheme not in {"http", "https"} or not host or not port
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or not re.fullmatch(r"/host/[^/\s]+", parsed.path)):
+        raise ValueError(f"{node}: Netdata URL must select a Parent host")
+    if ("NETDATA_PARENT" in host.upper() or "REPLACE" in host.upper()
+            or "NETDATA_HOST_" in parsed.path.upper() or "REPLACE" in parsed.path.upper()):
+        raise ValueError(f"{node}: Netdata URL contains a placeholder; set the real Parent host route in the ignored local config")
 
 
 def _check_control_side_dependencies(plan: dict[str, Any]) -> None:
@@ -403,8 +420,6 @@ def prepare(
                 env[key]["value"] = value
             if not re.fullmatch(r"GPU-[a-fA-F0-9-]+", item["gpu_uuid"]):
                 raise ValueError(f"{node}: GPU UUID is invalid or a placeholder")
-            if not re.fullmatch(r"https?://[^\s]+/host/[^/\s]+", item["netdata_url"]):
-                raise ValueError(f"{node}: Netdata URL must select a Parent host")
             for section in ("requests", "limits"):
                 override = (item.get("resources") or {}).get(section, {})
                 if set(override) - {"cpu", "memory"}:
@@ -431,6 +446,10 @@ def prepare(
             raise ValueError(f"{node}: profile template does not mount artifact PVC {pvc}")
         container = spec["containers"][0]
         values = _env(container)
+        if (config["schema_version"].endswith("/v2")
+                and container.get("securityContext", {}).get("privileged") is True):
+            raise ValueError(f"{node}: privileged profiler bypasses HAMi scheduler mutation")
+        _validate_netdata_url(node, str(values["NETDATA_URL"].get("value", "")))
         if values["NODE_NAME"].get("value") != node or values["DEVICE_ID"].get("value") != item["device_id"]:
             raise ValueError(f"{node}: profile template identity differs from config")
         if spec.get("runtimeClassName") != deployment["runtime_class"]:
@@ -776,7 +795,6 @@ def _smoke_pods(plan: dict[str, Any], jobs: list[dict[str, Any]]) -> list[dict[s
                 "containers": [{
                     "name": "smoke", "image": source_container["image"],
                     "imagePullPolicy": source_container.get("imagePullPolicy", "IfNotPresent"),
-                    "securityContext": source_container.get("securityContext", {}),
                     "command": ["python3", "-c", SMOKE_PROGRAM.replace(
                         "/opt/pre6g/nsight/target-linux-x64/nsys", plan["deployment"]["nsight_cli"])],
                     "env": [
@@ -813,6 +831,37 @@ def _parse_smoke_log(log: str, *, run_id: str, node: str, gpu_uuid: str) -> dict
     return result
 
 
+def _capture_smoke_diagnostics(context: str, namespace: str, name: str, output: Path) -> str:
+    """Save admission/scheduling evidence before deleting a failed smoke Pod."""
+    log_dir = output / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    commands = {
+        "status.json": _kubectl(context, "-n", namespace, "get", "pod", name, "-o", "json"),
+        "events.json": _kubectl(context, "-n", namespace, "get", "events", "--field-selector", f"involvedObject.name={name}", "-o", "json"),
+        "describe.txt": _kubectl(context, "-n", namespace, "describe", "pod", name),
+    }
+    outputs: dict[str, str] = {}
+    for suffix, command in commands.items():
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=30)
+            content = result.stdout + result.stderr
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            content = f"diagnostic command unavailable: {exc}\n"
+        (log_dir / f"{name}.{suffix}").write_text(content, encoding="utf-8")
+        outputs[suffix] = content
+    try:
+        status = json.loads(outputs["status.json"])
+    except (ValueError, TypeError):
+        status = {}
+    scheduler = status.get("spec", {}).get("schedulerName")
+    if scheduler and scheduler != "hami-scheduler":
+        return f"{name} was admitted with schedulerName={scheduler}; check HAMi webhook mutation and privileged settings"
+    event_text = outputs["events.json"] + outputs["describe.txt"]
+    if "FailedScheduling" in event_text or "Unschedulable" in event_text:
+        return f"{name} could not be scheduled; inspect HAMi GPU quota, allocatable resources, nodeSelector and saved Events"
+    return f"inspect {name}.status.json, .events.json, .describe.txt and .log in {log_dir}"
+
+
 def _run_smoke(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, output: Path) -> None:
     namespace = plan["namespace"]
     log = output / "logs" / "kubectl.log"
@@ -825,6 +874,7 @@ def _run_smoke(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
     _invoke(_kubectl(context, "-n", namespace, "apply", "--dry-run=server", "-f", str(manifest)), cwd=output, log=log)
     created: list[dict[str, Any]] = []
     cleanup_errors: list[str] = []
+    smoke_error: Exception | None = None
     try:
         for pod in pods:
             name = pod["metadata"]["name"]
@@ -836,29 +886,47 @@ def _run_smoke(plan: dict[str, Any], jobs: list[dict[str, Any]], context: str, o
         deadline = time.monotonic() + 360
         while time.monotonic() < deadline:
             raw = _invoke(_kubectl(context, "-n", namespace, "get", "pods", "-l", f"pre6g.io/smoke-id={plan['run_id']}", "-o", "json"), cwd=output, log=log)
-            statuses = {row["metadata"]["name"]: row.get("status", {}) for row in json.loads(raw).get("items", [])}
+            rows = {row["metadata"]["name"]: row for row in json.loads(raw).get("items", [])}
+            statuses = {name: row.get("status", {}) for name, row in rows.items()}
+            wrong_scheduler = [name for name in expected if rows.get(name, {}).get("spec", {}).get("schedulerName") not in (None, "hami-scheduler")]
+            if wrong_scheduler:
+                raise RuntimeError(f"smoke Pod bypassed HAMi scheduling: {', '.join(sorted(wrong_scheduler))}")
             if any(statuses.get(name, {}).get("phase") == "Failed" for name in expected):
-                raise RuntimeError("a smoke Pod failed; inspect the saved Pod logs")
+                raise RuntimeError("a smoke Pod failed")
             if all(statuses.get(name, {}).get("phase") == "Succeeded" for name in expected):
                 break
             time.sleep(5)
         else:
             raise RuntimeError("smoke Pods did not all succeed within six minutes")
+    except Exception as exc:
+        smoke_error = exc
     finally:
+        hints: list[str] = []
         for pod in created:
             name = pod["metadata"]["name"]
-            result = subprocess.run(_kubectl(context, "-n", namespace, "logs", name, "-c", "smoke"), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+            try:
+                result = subprocess.run(_kubectl(context, "-n", namespace, "logs", name, "-c", "smoke"), capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=30)
+                content = result.stdout + result.stderr
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                content = f"Pod log retrieval unavailable: {exc}\n"
             path = output / "logs" / f"{name}.log"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(result.stdout + result.stderr, encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
+            if smoke_error is not None:
+                hints.append(_capture_smoke_diagnostics(context, namespace, name, output))
         for pod in created:
             name = pod["metadata"]["name"]
             try:
                 _invoke(_kubectl(context, "-n", namespace, "delete", "pod", name, "--wait=true", "--timeout=60s"), cwd=output, log=log)
             except RuntimeError as exc:
                 cleanup_errors.append(f"{name}: {exc}")
+    if smoke_error is not None:
+        detail = "; ".join(hints)
         if cleanup_errors:
-            raise RuntimeError("smoke Pod cleanup failed: " + "; ".join(cleanup_errors))
+            detail += "; smoke Pod cleanup failed: " + "; ".join(cleanup_errors)
+        raise RuntimeError(f"{smoke_error}; {detail}") from smoke_error
+    if cleanup_errors:
+        raise RuntimeError("smoke Pod cleanup failed: " + "; ".join(cleanup_errors))
     results = []
     for item in plan["candidates"]:
         name = _name(f"pre6g-smoke-{plan['run_id']}-{item['node']}", "smoke Pod name")
