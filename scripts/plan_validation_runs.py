@@ -60,6 +60,8 @@ def plan(job: dict[str, Any], ranking: dict[str, Any], discovery: dict[str, Any]
     source_units = discovery["work"].get("total_units")
     if source_units != ranking.get("total_work_units"):
         raise ValueError("ranking total_work_units must match source Job discovery")
+    if "activeDeadlineSeconds" in job["spec"] or "activeDeadlineSeconds" in job["spec"]["template"]["spec"]:
+        raise ValueError("Ground Truth source must not set activeDeadlineSeconds")
     template = job["spec"]["template"]
     pod_spec = template["spec"]
     containers = pod_spec.get("containers") or []
@@ -207,15 +209,17 @@ def main() -> None:
     }
     (args.output_dir / "validation-plan.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (args.output_dir / "validation-jobs.yaml").write_text(yaml.safe_dump_all(jobs, sort_keys=False, allow_unicode=True), encoding="utf-8")
-    namespace = result["namespace"]
+    common = (f'python scripts/run_validation_jobs.py --plan "{args.output_dir / "validation-plan.json"}" '
+              f'--jobs "{args.output_dir / "validation-jobs.yaml"}" --kube-context CONTEXT')
     commands = [
-        "# Review validation-plan.json and validation-jobs.yaml before applying.",
-        "kubectl config current-context",
-        f"kubectl apply --dry-run=server -n {namespace} -f validation-jobs.yaml",
-        f"kubectl apply -n {namespace} -f validation-jobs.yaml",
-        f"kubectl wait -n {namespace} --for=condition=complete job -l pre6g.io/validation-id={args.validation_id} --timeout=3h",
-        f"kubectl get pods -n {namespace} -l pre6g.io/validation-id={args.validation_id} -o json > validation-pods.json",
-        f"kubectl get jobs -n {namespace} -l pre6g.io/validation-id={args.validation_id} -o wide",
+        "# From the repository root: review the plan/Jobs and replace CONTEXT.",
+        "# Preflight does not create workloads.",
+        common + f' --output-dir "{args.output_dir / "preflight"}"',
+        "# Creates real unprofiled Jobs; default monitor has no deadline.",
+        common + f' --output-dir "{args.output_dir / "execution"}" --execute',
+        "# Reconnect to the SAME Jobs/UIDs after interruption or timeout; never resubmits.",
+        common + f' --output-dir "{args.output_dir / "execution"}" --resume',
+        "# Optional monitor deadline: append --timeout-seconds N (N>0). Jobs keep running.",
     ]
     (args.output_dir / "deploy-commands.txt").write_text("\n".join(commands) + "\n", encoding="utf-8")
     print(json.dumps(result, ensure_ascii=False, indent=2))

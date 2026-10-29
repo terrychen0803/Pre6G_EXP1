@@ -20,6 +20,8 @@ def timestamp(value: str) -> datetime:
 
 
 def pod_intervals(pods: dict[str, Any], plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if pods.get("ground_truth_valid") is False:
+        raise ValueError("Ground Truth monitoring/evidence is incomplete or failed; resume collection before evaluation")
     result: dict[str, dict[str, Any]] = {}
     expected = {row["node"]: row["job_name"] for row in plan["jobs"]}
     for pod in pods.get("items", []):

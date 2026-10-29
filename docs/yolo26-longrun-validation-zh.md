@@ -45,7 +45,10 @@ python scripts/run_experiment_pipeline.py \
 kubectl config current-context
 kubectl apply --dry-run=server -n experiments -f validation-jobs.yaml
 kubectl apply -n experiments -f validation-jobs.yaml
-kubectl wait -n experiments --for=condition=complete job -l pre6g.io/validation-id=yolo26-formal-full-001 --timeout=3h
+python scripts/run_validation_jobs.py \
+  --plan generated/yolo26-formal-full-001/validation-plan.json \
+  --jobs generated/yolo26-formal-full-001/validation-jobs.yaml \
+  --kube-context CONTEXT --output-dir generated/yolo26-formal-full-001/execution --attach
 kubectl get pods -n experiments -l pre6g.io/validation-id=yolo26-formal-full-001 -o json > validation-pods.json
 ```
 
@@ -80,8 +83,8 @@ python scripts/run_experiment_pipeline.py \
   --mode validation-evaluate \
   --validation-plan generated/yolo26-formal-full-001/validation-plan.json \
   --pods-json generated/yolo26-formal-full-001/validation-pods.json \
-  --pdu iccl-s3-251230=pdu-outlet1.csv \
-  --pdu mirc516-20250605=pdu-outlet7.csv \
+  --pdu worker-4090=pdu-outlet1.csv \
+  --pdu worker-5090=pdu-outlet7.csv \
   --pdu-interval end \
   --timestamp-column timestamp \
   --power-column power_w \
@@ -93,3 +96,5 @@ python scripts/run_experiment_pipeline.py \
 ## 尚需你確認的外部資料
 
 請提供一小段**去識別化** PDU CSV 或欄位截圖，以及兩個 outlet 與節點的實際對應、timestamp 起點／終點慣例與時區。這樣才能用真實匯出格式做最後一次 parser 驗證。這次準備工作沒有連線 K3s，也沒有啟動 30–50 分鐘訓練。
+
+上方 attach 需替換實際 plan/jobs/context/目錄；預設無監控期限，已有同目錄紀錄則用 `--resume`。來源 Job 不應有 `activeDeadlineSeconds`。詳見 [Ground Truth 手冊](ground-truth-collection.md)，失敗或中斷資料不能視為有效樣本。

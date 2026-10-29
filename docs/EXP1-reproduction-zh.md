@@ -82,8 +82,10 @@ python scripts/run_validation_jobs.py \
   --plan "generated/$VALIDATION/validation-plan.json" \
   --jobs "generated/$VALIDATION/validation-jobs.yaml" \
   --kube-context "$CTX" --output-dir "generated/$VALIDATION/execution" \
-  --timeout-seconds 10800 --execute
+  --execute
 ```
+
+第二個命令預設沒有監控期限，Job 也沒有固定三小時 deadline。中斷或逾時後用同一 execution 目錄及 `--resume` 補收集；不要再次 execute。詳細操作見 [長時間 Ground Truth 手冊](ground-truth-collection.md)。
 
 第二個命令會真正啟動兩個完整訓練。它先做 server-side dry-run、兩節點工作內容一致性與 Job 名稱檢查，再建立 Jobs，等待完成，保存 `validation-pods.json`、各節點 log、events 和輸入 hash。若任何 Job 失敗或重試，不把它算作成功樣本。時間 ground truth 使用 `trainer` container 的 `startedAt`／`finishedAt`；K8s 排程、Pod 建立與 init container 資料生成不列入模型誤差。PDU 也只積分相同的 trainer 時窗。
 

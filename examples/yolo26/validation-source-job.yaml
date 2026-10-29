@@ -16,7 +16,6 @@ metadata:
     pre6g.io/work-estimate-assumptions: single-gpu,no-gradient-accumulation,no-drop-last
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 10800
   template:
     spec:
       runtimeClassName: nvidia
