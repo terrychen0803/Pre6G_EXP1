@@ -119,3 +119,5 @@ tar -czf "generated/$RUN.tar.gz" "generated/$RUN" "generated/$RUN.sha256"
 ## 6. Ground Truth 與重複實驗
 
 使用 [EXP1 重現手冊](EXP1-reproduction-zh.md) 第 4–6 節：凍結同一 source Job，所有候選執行相同 unprofiled `trainer`，以 container startedAt/finishedAt 和同窗 PDU energy 評估。短 fixture、steady runtime、整個 Job ETA、PDU gross energy 是不同量，不能互換。缺真實 PDU 欄位/時區/取樣語意或未完成完整訓練時，`evaluation_complete` 不應視為已達成。
+
+完整 Ground Truth 不再有固定三小時截止，詳見 [長時間收集／中斷恢復手冊](ground-truth-collection.md)。這項變更只作用於 unprofiled 完整 Jobs；120 秒 Profiling 與工具 Smoke 安全限制不變。

@@ -69,6 +69,12 @@ python scripts/measure_decision_latency.py \
 
 `docs/evidence/` 保存歷史觀測，不代表目前叢集狀態；舊 k3s/NFS/sharing 安裝範本在 `cluster/`，不得直接套用到 RKE2/HAMi。新的共享儲存範例為 [configs/artifacts-pvc.example.yaml](configs/artifacts-pvc.example.yaml)。
 
+## 長時間 Ground Truth（預設無時間上限）
+
+完整 Ground Truth source Job 已移除固定三小時 `activeDeadlineSeconds`。`scripts/run_validation_jobs.py --timeout-seconds` 預設為 `0`，每 30 秒同時檢查所有候選的 Complete/Failed，直到所有預定 workload 自然結束。正數 timeout 只停止本次監控；Ctrl-C、timeout 或重新連接都不刪除／終止 Jobs。可用相同 plan/jobs/context/output-dir 的 `--resume` 恢復並補收集，或用 `--attach` 連接已存在 Jobs。
+
+失敗、中斷及缺少證據的結果不會標記為有效 Ground Truth。epochs、batch、52,448 iterations、trainer 時窗定義、Frozen Models、120 秒 Nsight dry-run 及 Smoke 限制保持原樣。執行命令、metadata、恢復流程與長時間資源監控請見 [Ground Truth 收集手冊](docs/ground-truth-collection.md)。
+
 ## 目前正式候選：RTX4090／RTX5090 Frozen Runtime Models
 
 | Device | Artifact | Schema / Type | Detector |

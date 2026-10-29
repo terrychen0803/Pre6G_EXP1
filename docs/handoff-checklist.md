@@ -42,3 +42,13 @@
 - [ ] 保存失敗樣本與 logs/events，不刪除以粉飾成功率；不足 gate 明確列 pending。
 - [ ] 確認沒有 Token/Password/Secret/kubeconfig/PDU 私有資料進入 Git；共享資料備份及 retention 的負責人已指定。
 - [ ] 下一位研究人員依 README → environment-setup → configuration → data-collection-guide 可從新 clone 完成離線計畫，再依許可時段驗證 live gates。
+
+## 長時間 Ground Truth
+
+- [ ] 來源與生成的完整訓練 Jobs 都沒有 `activeDeadlineSeconds`；epochs/batch/work units 不變，舊 run 不混用新 plan。
+- [ ] `--timeout-seconds 0` 是無整體監控期限；正數 timeout 不會停止 Kubernetes Jobs；120 秒 dry-run／Smoke 限制仍保留。
+- [ ] 持久 output directory、plan/jobs Hash、context、Job UID 已記錄；僅一個 monitor process；中斷後使用 `--resume`，不重複建立 Jobs。
+- [ ] 每 node 的 Complete/Failed/FailureTarget 與錯誤證據獨立追蹤；API 中斷時 Jobs 可能仍在執行。
+- [ ] 完整 trainer 起迄、Pod JSON、所有 init/app logs、events/metadata 保存；`ground_truth_valid=true` 才交付評估，不使用失敗／不完整快照。
+- [ ] 安排 GPU/CPU/memory、Node、log/storage/Netdata retention、PDU 長時窗覆蓋與備份值班；不提前清除 Job/Pod 證據。
+- [ ] 已讀 [Ground Truth 收集與恢復手冊](ground-truth-collection.md)；Mock PASS 不代表實際長時間 GPU 驗證完成。
